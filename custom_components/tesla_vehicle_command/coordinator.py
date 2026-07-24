@@ -31,6 +31,7 @@ from .proxy_manager import ProxyManager
 _LOGGER = logging.getLogger(__name__)
 
 _FLEET_TELEMETRY_FIELDS = {
+    # Charging
     "Soc": {"interval_seconds": 60},
     "BatteryLevel": {"interval_seconds": 60},
     "RatedRange": {"interval_seconds": 60},
@@ -46,6 +47,44 @@ _FLEET_TELEMETRY_FIELDS = {
     "ACChargingEnergyIn": {"interval_seconds": 60},
     "DCChargingEnergyIn": {"interval_seconds": 60},
     "ChargePortDoorOpen": {"interval_seconds": 60},
+    "ChargeCurrentRequest": {"interval_seconds": 60},
+    "ChargeCurrentRequestMax": {"interval_seconds": 60},
+    "ChargeEnableRequest": {"interval_seconds": 60},
+    "ChargePortLatch": {"interval_seconds": 60},
+    "ChargeRateMilePerHour": {"interval_seconds": 60},
+    "ChargerPhases": {"interval_seconds": 60},
+    "ChargingCableType": {"interval_seconds": 60},
+    "FastChargerPresent": {"interval_seconds": 60},
+    "FastChargerType": {"interval_seconds": 60},
+    "ScheduledChargingMode": {"interval_seconds": 300},
+    "ScheduledChargingPending": {"interval_seconds": 300},
+    "ScheduledChargingStartTime": {"interval_seconds": 300},
+    "SuperchargerSessionTripPlanner": {"interval_seconds": 60},
+    "NotEnoughPowerToHeat": {"interval_seconds": 60},
+    "BatteryHeaterOn": {"interval_seconds": 60},
+    "BMSState": {"interval_seconds": 60},
+    "BmsFullchargecomplete": {"interval_seconds": 60},
+    "DCDCEnable": {"interval_seconds": 60},
+    "PackCurrent": {"interval_seconds": 60},
+    "PackVoltage": {"interval_seconds": 60},
+    "EnergyRemaining": {"interval_seconds": 60},
+    "LifetimeEnergyUsed": {"interval_seconds": 3600},
+    "ModuleTempMax": {"interval_seconds": 60},
+    "ModuleTempMin": {"interval_seconds": 60},
+    "NumModuleTempMax": {"interval_seconds": 60},
+    "NumModuleTempMin": {"interval_seconds": 60},
+    "BrickVoltageMax": {"interval_seconds": 60},
+    "BrickVoltageMin": {"interval_seconds": 60},
+    "NumBrickVoltageMax": {"interval_seconds": 60},
+    "NumBrickVoltageMin": {"interval_seconds": 60},
+    "IsolationResistance": {"interval_seconds": 3600},
+    "PowershareHoursLeft": {"interval_seconds": 60},
+    "PowershareInstantaneousPowerKW": {"interval_seconds": 60},
+    "PowershareStatus": {"interval_seconds": 60},
+    "PowershareStopReason": {"interval_seconds": 60},
+    "PowershareType": {"interval_seconds": 60},
+    
+    # Climate
     "InsideTemp": {"interval_seconds": 300},
     "OutsideTemp": {"interval_seconds": 300},
     "HvacLeftTemperatureRequest": {"interval_seconds": 300},
@@ -61,16 +100,33 @@ _FLEET_TELEMETRY_FIELDS = {
     "SeatHeaterRearRight": {"interval_seconds": 60},
     "SeatHeaterRearCenter": {"interval_seconds": 60},
     "HvacSteeringWheelHeatLevel": {"interval_seconds": 60},
+    "SeatCoolerLeft": {"interval_seconds": 60},
+    "SeatCoolerRight": {"interval_seconds": 60},
+    "SeatCoolerRearLeft": {"interval_seconds": 60},
+    "SeatCoolerRearRight": {"interval_seconds": 60},
+    "SeatCoolerRearCenter": {"interval_seconds": 60},
+    "HvacSteeringWheelCoolLevel": {"interval_seconds": 60},
+    "HvacACEnabled": {"interval_seconds": 60},
+    "HvacAutoMode": {"interval_seconds": 60},
+    "HvacFanSpeed": {"interval_seconds": 60},
+    "HvacSteeringWheelHeatAuto": {"interval_seconds": 60},
+    "RearDefrostEnabled": {"interval_seconds": 60},
+    "RearDisplayHvacEnabled": {"interval_seconds": 60},
+    "DefrostForPreconditioning": {"interval_seconds": 60},
+    "CabinOverheatProtectionMode": {"interval_seconds": 300},
+    "CabinOverheatProtectionTemperatureLimit": {"interval_seconds": 300},
+    "WiperHeatEnabled": {"interval_seconds": 60},
+    "ClimateSeatCoolingFrontLeft": {"interval_seconds": 60},
+    "ClimateSeatCoolingFrontRight": {"interval_seconds": 60},
+    "AutoSeatClimateLeft": {"interval_seconds": 60},
+    "AutoSeatClimateRight": {"interval_seconds": 60},
+    "AutoSteeringWheelHeatClimateRequest": {"interval_seconds": 60},
+    
+    # Vehicle State
     "Locked": {"interval_seconds": 60},
     "SentryMode": {"interval_seconds": 300},
     "DoorState": {"interval_seconds": 60},
     "DriverSeatOccupied": {"interval_seconds": 60},
-    "Gear": {"interval_seconds": 2},
-    "VehicleSpeed": {"interval_seconds": 2},
-    "GpsHeading": {"interval_seconds": 2},
-    "Location": {"interval_seconds": 2},
-    "Odometer": {"interval_seconds": 300},
-    "Version": {"interval_seconds": 3600},
     "FdWindow": {"interval_seconds": 60},
     "FpWindow": {"interval_seconds": 60},
     "RdWindow": {"interval_seconds": 60},
@@ -79,6 +135,164 @@ _FLEET_TELEMETRY_FIELDS = {
     "TpmsPressureFr": {"interval_seconds": 300},
     "TpmsPressureRl": {"interval_seconds": 300},
     "TpmsPressureRr": {"interval_seconds": 300},
+    "TpmsHardWarnings": {"interval_seconds": 300},
+    "TpmsSoftWarnings": {"interval_seconds": 300},
+    "TpmsLastSeenPressureTimeFl": {"interval_seconds": 300},
+    "TpmsLastSeenPressureTimeFr": {"interval_seconds": 300},
+    "TpmsLastSeenPressureTimeRl": {"interval_seconds": 300},
+    "TpmsLastSeenPressureTimeRr": {"interval_seconds": 300},
+    "ValetModeEnabled": {"interval_seconds": 60},
+    "SpeedLimitMode": {"interval_seconds": 60},
+    "CurrentLimitMph": {"interval_seconds": 60},
+    "PinToDriveEnabled": {"interval_seconds": 60},
+    "GuestModeEnabled": {"interval_seconds": 60},
+    "GuestModeMobileAccessState": {"interval_seconds": 60},
+    "ServiceMode": {"interval_seconds": 3600},
+    "RemoteStartEnabled": {"interval_seconds": 60},
+    "HomelinkDeviceCount": {"interval_seconds": 60},
+    "HomelinkNearby": {"interval_seconds": 60},
+    "PairedPhoneKeyAndKeyFobQty": {"interval_seconds": 3600},
+    "DriverSeatBelt": {"interval_seconds": 60},
+    "PassengerSeatBelt": {"interval_seconds": 60},
+    "LightsHazardsActive": {"interval_seconds": 60},
+    "LightsHighBeams": {"interval_seconds": 60},
+    "LightsTurnSignal": {"interval_seconds": 60},
+    "CenterDisplay": {"interval_seconds": 60},
+    "TonneauOpenPercent": {"interval_seconds": 60},
+    "TonneauPosition": {"interval_seconds": 60},
+    "TonneauTentMode": {"interval_seconds": 60},
+    "OffroadLightbarPresent": {"interval_seconds": 3600},
+    "SunroofInstalled": {"interval_seconds": 3600},
+    "RightHandDrive": {"interval_seconds": 3600},
+    "EuropeVehicle": {"interval_seconds": 3600},
+    "CarType": {"interval_seconds": 3600},
+    "Trim": {"interval_seconds": 3600},
+    "ExteriorColor": {"interval_seconds": 3600},
+    "RoofColor": {"interval_seconds": 3600},
+    "WheelType": {"interval_seconds": 3600},
+    "EfficiencyPackage": {"interval_seconds": 3600},
+    "RearSeatHeaters": {"interval_seconds": 3600},
+    "ChargePort": {"interval_seconds": 3600},
+    "SoftwareUpdateDownloadPercentComplete": {"interval_seconds": 60},
+    "SoftwareUpdateExpectedDurationMinutes": {"interval_seconds": 60},
+    "SoftwareUpdateInstallationPercentComplete": {"interval_seconds": 60},
+    "SoftwareUpdateScheduledStartTime": {"interval_seconds": 60},
+    "SoftwareUpdateVersion": {"interval_seconds": 60},
+    "Version": {"interval_seconds": 3600},
+    "VehicleName": {"interval_seconds": 3600},
+    
+    # Driving
+    "Gear": {"interval_seconds": 2},
+    "VehicleSpeed": {"interval_seconds": 2},
+    "GpsHeading": {"interval_seconds": 2},
+    "GpsState": {"interval_seconds": 2},
+    "Location": {"interval_seconds": 2},
+    "Odometer": {"interval_seconds": 300},
+    "BrakePedal": {"interval_seconds": 2},
+    "BrakePedalPos": {"interval_seconds": 2},
+    "PedalPosition": {"interval_seconds": 2},
+    "CruiseSetSpeed": {"interval_seconds": 2},
+    "CruiseFollowDistance": {"interval_seconds": 2},
+    "DriveRail": {"interval_seconds": 2},
+    "LongitudinalAcceleration": {"interval_seconds": 2},
+    "LateralAcceleration": {"interval_seconds": 2},
+    "MilesSinceReset": {"interval_seconds": 3600},
+    "SelfDrivingMilesSinceReset": {"interval_seconds": 3600},
+    "SpeedLimitWarning": {"interval_seconds": 60},
+    "ForwardCollisionWarning": {"interval_seconds": 60},
+    "LaneDepartureAvoidance": {"interval_seconds": 60},
+    "EmergencyLaneDepartureAvoidance": {"interval_seconds": 60},
+    "AutomaticBlindSpotCamera": {"interval_seconds": 60},
+    "BlindSpotCollisionWarningChime": {"interval_seconds": 60},
+    "AutomaticEmergencyBrakingOff": {"interval_seconds": 60},
+    
+    # Location/Navigation
+    "DestinationLocation": {"interval_seconds": 60},
+    "DestinationName": {"interval_seconds": 60},
+    "OriginLocation": {"interval_seconds": 60},
+    "RouteLine": {"interval_seconds": 60},
+    "RouteTrafficMinutesDelay": {"interval_seconds": 60},
+    "RouteLastUpdated": {"interval_seconds": 60},
+    "MilesToArrival": {"interval_seconds": 60},
+    "MinutesToArrival": {"interval_seconds": 60},
+    "ExpectedEnergyPercentAtTripArrival": {"interval_seconds": 60},
+    "LocatedAtFavorite": {"interval_seconds": 60},
+    "LocatedAtHome": {"interval_seconds": 60},
+    "LocatedAtWork": {"interval_seconds": 60},
+    
+    # Media
+    "MediaPlaybackStatus": {"interval_seconds": 60},
+    "MediaPlaybackSource": {"interval_seconds": 60},
+    "MediaNowPlayingTitle": {"interval_seconds": 60},
+    "MediaNowPlayingArtist": {"interval_seconds": 60},
+    "MediaNowPlayingAlbum": {"interval_seconds": 60},
+    "MediaNowPlayingStation": {"interval_seconds": 60},
+    "MediaNowPlayingDuration": {"interval_seconds": 60},
+    "MediaNowPlayingElapsed": {"interval_seconds": 60},
+    "MediaAudioVolume": {"interval_seconds": 60},
+    "MediaAudioVolumeIncrement": {"interval_seconds": 60},
+    "MediaAudioVolumeMax": {"interval_seconds": 60},
+    
+    # Powertrain
+    "DiStateF": {"interval_seconds": 60},
+    "DiStateR": {"interval_seconds": 60},
+    "DiStateREL": {"interval_seconds": 60},
+    "DiStateRER": {"interval_seconds": 60},
+    "DiAxleSpeedF": {"interval_seconds": 60},
+    "DiAxleSpeedR": {"interval_seconds": 60},
+    "DiAxleSpeedREL": {"interval_seconds": 60},
+    "DiAxleSpeedRER": {"interval_seconds": 60},
+    "DiMotorCurrentF": {"interval_seconds": 60},
+    "DiMotorCurrentR": {"interval_seconds": 60},
+    "DiMotorCurrentREL": {"interval_seconds": 60},
+    "DiMotorCurrentRER": {"interval_seconds": 60},
+    "DiTorqueActualF": {"interval_seconds": 60},
+    "DiTorqueActualR": {"interval_seconds": 60},
+    "DiTorqueActualREL": {"interval_seconds": 60},
+    "DiTorqueActualRER": {"interval_seconds": 60},
+    "DiTorquemotor": {"interval_seconds": 60},
+    "DiSlaveTorqueCmd": {"interval_seconds": 60},
+    "DiInverterTF": {"interval_seconds": 60},
+    "DiInverterTR": {"interval_seconds": 60},
+    "DiInverterTREL": {"interval_seconds": 60},
+    "DiInverterTRER": {"interval_seconds": 60},
+    "DiHeatsinkTF": {"interval_seconds": 60},
+    "DiHeatsinkTR": {"interval_seconds": 60},
+    "DiHeatsinkTREL": {"interval_seconds": 60},
+    "DiHeatsinkTRER": {"interval_seconds": 60},
+    "DiStatorTempF": {"interval_seconds": 60},
+    "DiStatorTempR": {"interval_seconds": 60},
+    "DiStatorTempREL": {"interval_seconds": 60},
+    "DiStatorTempRER": {"interval_seconds": 60},
+    "DiVBatF": {"interval_seconds": 60},
+    "DiVBatR": {"interval_seconds": 60},
+    "DiVBatREL": {"interval_seconds": 60},
+    "DiVBatRER": {"interval_seconds": 60},
+    "Hvil": {"interval_seconds": 60},
+    
+    # Safety/Service
+    "TpmsPressureFl": {"interval_seconds": 300},
+    "TpmsPressureFr": {"interval_seconds": 300},
+    "TpmsPressureRl": {"interval_seconds": 300},
+    "TpmsPressureRr": {"interval_seconds": 300},
+    "SemitruckTpmsPressureRe1L0": {"interval_seconds": 300},
+    "SemitruckTpmsPressureRe1L1": {"interval_seconds": 300},
+    "SemitruckTpmsPressureRe1R0": {"interval_seconds": 300},
+    "SemitruckTpmsPressureRe1R1": {"interval_seconds": 300},
+    "SemitruckTpmsPressureRe2L0": {"interval_seconds": 300},
+    "SemitruckTpmsPressureRe2L1": {"interval_seconds": 300},
+    "SemitruckTpmsPressureRe2R0": {"interval_seconds": 300},
+    "SemitruckTpmsPressureRe2R1": {"interval_seconds": 300},
+    "SemitruckTractorParkBrakeStatus": {"interval_seconds": 60},
+    "SemitruckTrailerParkBrakeStatus": {"interval_seconds": 60},
+    "SemitruckPassengerSeatFoldPosition": {"interval_seconds": 60},
+    
+    # User Preferences
+    "Setting24HourTime": {"interval_seconds": 3600},
+    "SettingChargeUnit": {"interval_seconds": 3600},
+    "SettingDistanceUnit": {"interval_seconds": 3600},
+    "SettingTemperatureUnit": {"interval_seconds": 3600},
+    "SettingTirePressureUnit": {"interval_seconds": 3600},
 }
 
 _TELEMETRY_STORE_VERSION = 2
@@ -469,3 +683,44 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if vehicle["vin"] == vin:
                 return vehicle
         return None
+
+    async def async_fetch_initial_vehicle_data(self, vin: str) -> dict[str, Any] | None:
+        """Fetch initial vehicle data from Fleet API via proxy."""
+        if not self.proxy_manager.is_running:
+            _LOGGER.warning("Proxy not running, cannot fetch initial vehicle data for %s", vin)
+            return None
+
+        try:
+            await self._ensure_valid_token()
+        except Exception as err:
+            _LOGGER.error("Failed to ensure valid token for %s: %s", vin, err)
+            return None
+
+        session = async_get_clientsession(self.hass)
+        ssl_context = await self._get_ssl_context()
+
+        url = f"https://{PROXY_HOST}:{PROXY_PORT}/api/1/vehicles/{vin}/vehicle_data"
+        headers = {"Authorization": f"Bearer {self._access_token}", "Content-Type": "application/json"}
+
+        try:
+            async with session.get(url, headers=headers, ssl=ssl_context, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 401:
+                    self._token_expires_at = 0
+                    await self._ensure_valid_token()
+                    headers["Authorization"] = f"Bearer {self._access_token}"
+                    async with session.get(url, headers=headers, ssl=ssl_context, timeout=aiohttp.ClientTimeout(total=30)) as retry_resp:
+                        if retry_resp.status != 200:
+                            text = await retry_resp.text()
+                            _LOGGER.error("Failed to fetch vehicle data for %s: %s - %s", vin, retry_resp.status, text)
+                            return None
+                        return await retry_resp.json()
+
+                if resp.status != 200:
+                    text = await resp.text()
+                    _LOGGER.error("Failed to fetch vehicle data for %s: %s - %s", vin, resp.status, text)
+                    return None
+
+                return await resp.json()
+        except Exception as err:
+            _LOGGER.error("Error fetching initial vehicle data for %s: %s", vin, err)
+            return None
