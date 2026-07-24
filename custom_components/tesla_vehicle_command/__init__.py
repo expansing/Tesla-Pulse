@@ -72,6 +72,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_load_telemetry_cache()
     await coordinator.async_config_entry_first_refresh()
 
+    # Fetch initial vehicle data for all vehicles to populate sensors
+    for vehicle in coordinator.vehicles:
+        vin = vehicle["vin"]
+        # Wake up vehicle first to ensure we can get data
+        try:
+            await coordinator.async_wake_up(vin)
+            _LOGGER.info("Woke up vehicle %s", vin)
+        except Exception as err:
+            _LOGGER.warning("Failed to wake up vehicle %s: %s", vin, err)
+        
+        initial_data = await coordinator.async_fetch_initial_vehicle_data(vin)
+        if initial_data and "response" in initial_data:
+            coordinator.set_telemetry_data(vin, initial_data["response"])
+            _LOGGER.info("Fetched initial vehicle data for %s", vin)
+
     # Initialize telemetry consumer (auto-discovers endpoint via Supervisor API)
     telemetry_consumer = await async_setup_telemetry_consumer(hass, coordinator)
 
