@@ -5,61 +5,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from typing import Any
 
-import aiohttp
 import zmq
 import zmq.asyncio
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN, TELEMETRY_ADDON_SLUG, TELEMETRY_ZMQ_PORT
+from .const import DOMAIN, TELEMETRY_ZMQ_PORT
 from .coordinator import TeslaVehicleCommandCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-class TelemetryEndpointDiscoveryError(RuntimeError):
-    """Raised when the telemetry add-on endpoint cannot be discovered."""
-
-
-async def _discover_telemetry_zmq_endpoint(hass: HomeAssistant) -> str:
-    """Discover the telemetry add-on hostname through the Supervisor API."""
-    supervisor_token = os.getenv("SUPERVISOR_TOKEN")
-    if not supervisor_token:
-        raise TelemetryEndpointDiscoveryError(
-            "Supervisor API access is unavailable; Fleet Telemetry requires "
-            "Home Assistant OS or Supervised"
-        )
-
-    try:
-        session = async_get_clientsession(hass)
-        async with session.get(
-            f"http://supervisor/addons/{TELEMETRY_ADDON_SLUG}/info",
-            headers={"Authorization": f"Bearer {supervisor_token}"},
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            if resp.status != 200:
-                raise TelemetryEndpointDiscoveryError(
-                    "Tesla Fleet Telemetry Receiver add-on is unavailable "
-                    f"(Supervisor API status {resp.status})"
-                )
-
-            addon = (await resp.json()).get("data", {})
-            hostname = addon.get("hostname")
-            if not isinstance(hostname, str) or not hostname:
-                raise TelemetryEndpointDiscoveryError(
-                    "Tesla Fleet Telemetry Receiver add-on did not report a hostname"
-                )
-    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-        raise TelemetryEndpointDiscoveryError(
-            f"Failed to query the Supervisor API: {err}"
-        ) from err
-
-    endpoint = f"tcp://{hostname}:{TELEMETRY_ZMQ_PORT}"
-    _LOGGER.info("Discovered Fleet Telemetry ZMQ endpoint: %s", endpoint)
-    return endpoint
+# Hardcoded addon hostname for the telemetry receiver
+TELEMETRY_ADDON_HOSTNAME = "local-tesla-vehicle-command-telemetry"
 
 
 class TelemetryConsumer:
@@ -69,12 +28,11 @@ class TelemetryConsumer:
         self,
         hass: HomeAssistant,
         coordinator: TeslaVehicleCommandCoordinator,
-        zmq_endpoint: str,
     ) -> None:
         """Initialize the telemetry consumer."""
         self.hass = hass
         self.coordinator = coordinator
-        self._zmq_endpoint = zmq_endpoint
+        self._zmq_endpoint = f"tcp://{TELEMETRY_ADDON_HOSTNAME}:{TELEMETRY_ZMQ_PORT}"
         self._context: zmq.asyncio.Context | None = None
         self._socket: zmq.asyncio.Socket | None = None
         self._task: asyncio.Task | None = None
@@ -90,7 +48,12 @@ class TelemetryConsumer:
         self._socket = self._context.socket(zmq.SUB)
         self._socket.setsockopt(zmq.SUBSCRIBE, b"")
         _LOGGER.info("Connecting to Fleet Telemetry ZMQ at %s", self._zmq_endpoint)
-        self._socket.connect(self._zmq_endpoint)
+        try:
+            self._socket.connect(self._zmq_endpoint)
+            _LOGGER.info("Successfully connected to Fleet Telemetry ZMQ at %s", self._zmq_endpoint)
+        except Exception as err:
+            _LOGGER.error("Failed to connect to Fleet Telemetry ZMQ at %s: %s", self._zmq_endpoint, err)
+            raise
 
         self._running = True
         self._task = asyncio.create_task(self._consume_loop())
@@ -118,25 +81,26 @@ class TelemetryConsumer:
 
     async def _consume_loop(self) -> None:
         """Main loop to consume telemetry messages."""
-        _LOGGER.debug("Telemetry consume loop started")
+        _LOGGER.info("Telemetry consume loop started on %s", self._zmq_endpoint)
         while self._running:
             try:
                 # Receive multipart message: [topic, payload]
                 parts = await self._socket.recv_multipart()
-                _LOGGER.debug("Received telemetry message: topic=%s, parts=%d", parts[0].decode("utf-8", errors="ignore") if parts else "none", len(parts))
+                _LOGGER.info("Received telemetry message: topic=%s, parts=%d", parts[0].decode("utf-8", errors="ignore") if parts else "none", len(parts))
                 if len(parts) >= 2:
                     topic = parts[0].decode("utf-8", errors="ignore")
                     payload = parts[1]
                     await self._process_message(topic, payload)
             except asyncio.CancelledError:
+                _LOGGER.info("Telemetry consume loop cancelled")
                 break
             except Exception as err:
-                _LOGGER.error("Error in telemetry consume loop: %s", err)
+                _LOGGER.error("Error in telemetry consume loop: %s", err, exc_info=True)
                 await asyncio.sleep(1)
 
     async def _process_message(self, topic: str, payload: bytes) -> None:
         """Process a single telemetry message."""
-        _LOGGER.debug("Processing telemetry message: topic=%s, payload_size=%d", topic, len(payload))
+        _LOGGER.info("Processing telemetry message: topic=%s, payload_size=%d", topic, len(payload))
         try:
             # The payload is JSON from the fleet-telemetry receiver
             data = json.loads(payload.decode("utf-8"))
@@ -144,23 +108,23 @@ class TelemetryConsumer:
             # Extract VIN from the message
             vin = data.get("vin")
             if not vin:
-                _LOGGER.debug("Telemetry message missing VIN: %s", topic)
+                _LOGGER.warning("Telemetry message missing VIN: %s", topic)
                 return
 
             # Check if this vehicle is managed by us
             vehicle_config = self.coordinator.get_vehicle_config(vin)
             if not vehicle_config:
-                _LOGGER.debug("Telemetry for unmanaged vehicle: %s", vin)
+                _LOGGER.warning("Telemetry for unmanaged vehicle: %s", vin)
                 return
 
-            _LOGGER.debug("Processing telemetry for vehicle %s, topic: %s", vin, topic)
+            _LOGGER.info("Processing telemetry for vehicle %s, topic: %s", vin, topic)
             # Process based on topic/type
             await self._update_coordinator_data(vin, topic, data)
 
         except json.JSONDecodeError as err:
-            _LOGGER.debug("Failed to decode telemetry payload: %s", err)
+            _LOGGER.warning("Failed to decode telemetry payload: %s", err)
         except Exception as err:
-            _LOGGER.error("Error processing telemetry message: %s", err)
+            _LOGGER.error("Error processing telemetry message: %s", err, exc_info=True)
 
     async def _update_coordinator_data(
         self, vin: str, topic: str, data: dict[str, Any]
@@ -502,14 +466,10 @@ async def async_setup_telemetry_consumer(
     hass: HomeAssistant,
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> TelemetryConsumer | None:
-    """Discover, set up, and start the telemetry consumer when available."""
-    try:
-        endpoint = await _discover_telemetry_zmq_endpoint(hass)
-    except TelemetryEndpointDiscoveryError as err:
-        _LOGGER.info("Fleet Telemetry consumer is unavailable: %s", err)
-        return None
-
-    consumer = TelemetryConsumer(hass, coordinator, endpoint)
+    """Set up and start the telemetry consumer."""
+    _LOGGER.info("Setting up telemetry consumer")
+    consumer = TelemetryConsumer(hass, coordinator)
     await consumer.async_start()
     coordinator.set_telemetry_receiver_available(True)
+    _LOGGER.info("Telemetry consumer started successfully")
     return consumer

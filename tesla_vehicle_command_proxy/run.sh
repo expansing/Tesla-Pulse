@@ -22,6 +22,8 @@ while [ ! -r "$CERT_FILE" ] || [ ! -r "$TLS_KEY_FILE" ] || [ ! -r "$COMMAND_KEY_
     sleep 2
 done
 
+export TESLA_VERBOSE=true
+
 while true; do
     /usr/local/bin/tesla-http-proxy \
         -host 0.0.0.0 \
