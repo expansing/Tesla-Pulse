@@ -318,7 +318,7 @@ SENSOR_DESCRIPTIONS = [
         value_path="charge_state.supercharger_session_trip_planner",
         icon="mdi:ev-station",
         default_value="No",
-    ),,
+    ),
     TeslaSensorEntityDescription(
         key="battery_heater_on",
         name="Battery Heater On",
