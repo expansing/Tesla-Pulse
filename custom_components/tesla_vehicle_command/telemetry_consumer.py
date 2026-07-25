@@ -601,7 +601,8 @@ class TelemetryConsumer:
         vehicle_state = response["vehicle_state"]
         for telemetry_key, state_key in door_mapping.items():
             if telemetry_key in doors:
-                vehicle_state[state_key] = cls._window_position(doors[telemetry_key])
+                # Convert 0/1 to "Closed"/"Open" for ENUM sensors
+                vehicle_state[state_key] = "Open" if cls._is_truthy(doors[telemetry_key]) else "Closed"
         processed_fields.add("DoorState")
 
     @staticmethod
