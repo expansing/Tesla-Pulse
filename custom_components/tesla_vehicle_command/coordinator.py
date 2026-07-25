@@ -68,6 +68,7 @@ _FLEET_TELEMETRY_FIELDS = {
     "PackCurrent": {"interval_seconds": 60},
     "PackVoltage": {"interval_seconds": 60},
     "EnergyRemaining": {"interval_seconds": 60},
+    "EstimatedHoursToChargeTermination": {"interval_seconds": 60},
     "LifetimeEnergyUsed": {"interval_seconds": 3600},
     "ModuleTempMax": {"interval_seconds": 60},
     "ModuleTempMin": {"interval_seconds": 60},
@@ -100,12 +101,6 @@ _FLEET_TELEMETRY_FIELDS = {
     "SeatHeaterRearRight": {"interval_seconds": 60},
     "SeatHeaterRearCenter": {"interval_seconds": 60},
     "HvacSteeringWheelHeatLevel": {"interval_seconds": 60},
-    "SeatCoolerLeft": {"interval_seconds": 60},
-    "SeatCoolerRight": {"interval_seconds": 60},
-    "SeatCoolerRearLeft": {"interval_seconds": 60},
-    "SeatCoolerRearRight": {"interval_seconds": 60},
-    "SeatCoolerRearCenter": {"interval_seconds": 60},
-    "HvacSteeringWheelCoolLevel": {"interval_seconds": 60},
     "HvacACEnabled": {"interval_seconds": 60},
     "HvacAutoMode": {"interval_seconds": 60},
     "HvacFanSpeed": {"interval_seconds": 60},
@@ -120,7 +115,6 @@ _FLEET_TELEMETRY_FIELDS = {
     "ClimateSeatCoolingFrontRight": {"interval_seconds": 60},
     "AutoSeatClimateLeft": {"interval_seconds": 60},
     "AutoSeatClimateRight": {"interval_seconds": 60},
-    "AutoSteeringWheelHeatClimateRequest": {"interval_seconds": 60},
     
     # Vehicle State
     "Locked": {"interval_seconds": 60},
@@ -714,6 +708,12 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             _LOGGER.error("Failed to fetch vehicle data for %s: %s - %s", vin, retry_resp.status, text)
                             return None
                         return await retry_resp.json()
+
+                if resp.status == 408:
+                    _LOGGER.debug(
+                        "Vehicle %s is offline or asleep; skipping Fleet API poll", vin
+                    )
+                    return None
 
                 if resp.status != 200:
                     text = await resp.text()
