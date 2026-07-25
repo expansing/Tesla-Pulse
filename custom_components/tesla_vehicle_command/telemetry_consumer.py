@@ -199,8 +199,8 @@ class TelemetryConsumer:
         signal_mapping = {
             # Battery/Charging
             "Soc": (
-                ("charge_state", "battery_level", self._to_int),
                 ("charge_state", "usable_battery_level", self._to_int),
+                ("charge_state", "battery_level", self._to_int),
             ),
             "BatteryLevel": (("charge_state", "battery_level", self._to_int),),
             "RatedRange": (("charge_state", "battery_range", None),),
@@ -212,11 +212,10 @@ class TelemetryConsumer:
             "ChargerVoltage": (("charge_state", "charger_voltage", self._to_int),),
             "ChargeAmps": (
                 ("charge_state", "charger_actual_current", self._to_int),
-                ("charge_state", "charge_current_request", self._to_int),
             ),
             "ChargePortDoorOpen": (("charge_state", "charge_port_door_open", self._is_truthy),),
-            "ACChargingPower": (("charge_state", "charger_power", self._to_int),),
-            "DCChargingPower": (("charge_state", "charger_power", self._to_int),),
+            "ACChargingPower": (("charge_state", "charger_power", None),),
+            "DCChargingPower": (("charge_state", "charger_power", None),),
             "ACChargingEnergyIn": (("charge_state", "charge_energy_added", None),),
             "DCChargingEnergyIn": (("charge_state", "charge_energy_added", None),),
             "ChargeCurrentRequest": (("charge_state", "charge_current_request", self._to_int),),
@@ -256,9 +255,11 @@ class TelemetryConsumer:
             "PowershareStatus": (("charge_state", "powershare_status", None),),
             "PowershareStopReason": (("charge_state", "powershare_stop_reason", None),),
             "PowershareType": (("charge_state", "powershare_type", None),),
-            "PreconditioningEnabled": (("charge_state", "preconditioning_enabled", self._is_truthy),),
-            "PreconditioningMax": (("climate_state", "preconditioning_max", self._is_truthy),),
-            
+            "PreconditioningEnabled": (
+                ("charge_state", "preconditioning_enabled", self._is_truthy),
+                ("climate_state", "is_preconditioning", self._is_truthy),
+            ),
+
             # Climate
             "InsideTemp": (("climate_state", "inside_temp", None),),
             "OutsideTemp": (("climate_state", "outside_temp", None),),
@@ -266,7 +267,6 @@ class TelemetryConsumer:
             "HvacRightTemperatureRequest": (("climate_state", "passenger_temp_setting", None),),
             "HvacFanStatus": (("climate_state", "fan_status", None),),
             "HvacPower": (("climate_state", "is_climate_on", self._is_truthy),),
-            "PreconditioningEnabled": (("climate_state", "is_preconditioning", self._is_truthy),),
             "ClimateKeeperMode": (("climate_state", "climate_keeper_mode", self._climate_keeper_mode),),
             "DefrostMode": (("climate_state", "defrost_mode", self._is_defrost_active),),
             "SeatHeaterLeft": (("climate_state", "seat_heater_left", self._to_int),),
@@ -275,18 +275,19 @@ class TelemetryConsumer:
             "SeatHeaterRearRight": (("climate_state", "seat_heater_rear_right", self._to_int),),
             "SeatHeaterRearCenter": (("climate_state", "seat_heater_rear_center", self._to_int),),
             "HvacSteeringWheelHeatLevel": (
+                ("climate_state", "steering_wheel_heat_level", self._to_int),
                 ("climate_state", "steering_wheel_heater", self._is_heat_active),
             ),
-            "SeatCoolerLeft": (("climate_state", "seat_cooler_left", self._to_int),),
-            "SeatCoolerRight": (("climate_state", "seat_cooler_right", self._to_int),),
-            "SeatCoolerRearLeft": (("climate_state", "seat_cooler_rear_left", self._to_int),),
-            "SeatCoolerRearRight": (("climate_state", "seat_cooler_rear_right", self._to_int),),
-            "SeatCoolerRearCenter": (("climate_state", "seat_cooler_rear_center", self._to_int),),
-            "HvacSteeringWheelCoolLevel": (
-                ("climate_state", "steering_wheel_cooler", self._is_heat_active),
+            "ClimateSeatCoolingFrontLeft": (
+                ("climate_state", "seat_fan_front_left", self._to_int),
+                ("climate_state", "seat_cooler_left", self._to_int),
+            ),
+            "ClimateSeatCoolingFrontRight": (
+                ("climate_state", "seat_fan_front_right", self._to_int),
+                ("climate_state", "seat_cooler_right", self._to_int),
             ),
             "HvacACEnabled": (("climate_state", "hvac_ac_enabled", self._is_truthy),),
-            "HvacAutoMode": (("climate_state", "hvac_auto_mode", None),),
+            "HvacAutoMode": (("climate_state", "hvac_auto_request", None),),
             "HvacFanSpeed": (("climate_state", "hvac_fan_speed", self._to_int),),
             "HvacSteeringWheelHeatAuto": (("climate_state", "auto_steering_wheel_heat", self._is_truthy),),
             "RearDefrostEnabled": (("climate_state", "is_rear_defroster_on", self._is_truthy),),
@@ -294,7 +295,6 @@ class TelemetryConsumer:
             "WiperHeatEnabled": (("climate_state", "wiper_blade_heater", self._is_truthy),),
             "AutoSeatClimateLeft": (("climate_state", "auto_seat_climate_left", self._is_truthy),),
             "AutoSeatClimateRight": (("climate_state", "auto_seat_climate_right", self._is_truthy),),
-            "AutoSteeringWheelHeatClimateRequest": (("climate_state", "auto_steering_wheel_heat_climate_request", self._is_truthy),),
             "CabinOverheatProtectionMode": (("climate_state", "cabin_overheat_protection", None),),
             "CabinOverheatProtectionTemperatureLimit": (("climate_state", "cop_activation_temperature", None),),
             "DefrostForPreconditioning": (("climate_state", "defrost_for_preconditioning", self._is_truthy),),
@@ -559,7 +559,7 @@ class TelemetryConsumer:
             if isinstance(value := last_signals.get(key), (int, float))
         ]
         if powers:
-            charge_state["charger_power"] = cls._to_int(max(powers))
+            charge_state["charger_power"] = max(powers)
         processed_fields.update(
             {"ACChargingPower", "DCChargingPower"} & received_fields
         )

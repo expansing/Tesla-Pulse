@@ -77,7 +77,7 @@ SENSOR_DESCRIPTIONS = [
         key="charging_state",
         name="Charging State",
         device_class=SensorDeviceClass.ENUM,
-        options=["Charging", "Complete", "Disconnected", "Stopped", "NoPower"],
+        options=["Charging", "Complete", "Disconnected", "Stopped", "NoPower", "Starting"],
         value_path="charge_state.charging_state",
         icon="mdi:ev-station",
     ),
@@ -106,7 +106,6 @@ SENSOR_DESCRIPTIONS = [
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
         value_path="charge_state.charger_power",
-        conversion="w_to_kw",
         icon="mdi:flash",
     ),
     TeslaSensorEntityDescription(
@@ -116,7 +115,6 @@ SENSOR_DESCRIPTIONS = [
         state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         value_path="charge_state.charge_energy_added",
-        conversion="wh_to_kwh",
         icon="mdi:battery-plus",
     ),
     TeslaSensorEntityDescription(
@@ -298,11 +296,10 @@ SENSOR_DESCRIPTIONS = [
     TeslaSensorEntityDescription(
         key="energy_remaining",
         name="Energy Remaining",
-        device_class=SensorDeviceClass.ENERGY,
+        device_class=SensorDeviceClass.ENERGY_STORAGE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         value_path="charge_state.energy_remaining",
-        conversion="wh_to_kwh",
         icon="mdi:battery",
     ),
     TeslaSensorEntityDescription(
@@ -321,7 +318,6 @@ SENSOR_DESCRIPTIONS = [
         state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         value_path="charge_state.lifetime_energy_used",
-        conversion="wh_to_kwh",
         icon="mdi:battery",
     ),
     TeslaSensorEntityDescription(
@@ -331,7 +327,6 @@ SENSOR_DESCRIPTIONS = [
         state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         value_path="charge_state.lifetime_energy_used_drive",
-        conversion="wh_to_kwh",
         icon="mdi:battery",
     ),
     TeslaSensorEntityDescription(
@@ -595,11 +590,27 @@ SENSOR_DESCRIPTIONS = [
         icon="mdi:steering",
     ),
     TeslaSensorEntityDescription(
+        key="steering_wheel_heat_level",
+        name="Steering Wheel Heat Level",
+        device_class=SensorDeviceClass.ENUM,
+        options=["Off", "Low", "Medium", "High"],
+        value_path="climate_state.steering_wheel_heat_level",
+        icon="mdi:steering",
+    ),
+    TeslaSensorEntityDescription(
+        key="auto_steering_wheel_heat",
+        name="Auto Steering Wheel Heat",
+        device_class=SensorDeviceClass.ENUM,
+        options=["On", "Off"],
+        value_path="climate_state.auto_steering_wheel_heat",
+        icon="mdi:steering",
+    ),
+    TeslaSensorEntityDescription(
         key="seat_cooler_left",
         name="Seat Cooler Left",
         device_class=SensorDeviceClass.ENUM,
         options=["Off", "Low", "Medium", "High"],
-        value_path="climate_state.seat_cooler_left",
+        value_path="climate_state.seat_fan_front_left",
         icon="mdi:seat-cooler",
     ),
     TeslaSensorEntityDescription(
@@ -607,40 +618,24 @@ SENSOR_DESCRIPTIONS = [
         name="Seat Cooler Right",
         device_class=SensorDeviceClass.ENUM,
         options=["Off", "Low", "Medium", "High"],
-        value_path="climate_state.seat_cooler_right",
+        value_path="climate_state.seat_fan_front_right",
         icon="mdi:seat-cooler",
     ),
     TeslaSensorEntityDescription(
-        key="seat_cooler_rear_left",
-        name="Rear Seat Cooler Left",
-        device_class=SensorDeviceClass.ENUM,
-        options=["Off", "Low", "Medium", "High"],
-        value_path="climate_state.seat_cooler_rear_left",
-        icon="mdi:seat-cooler",
-    ),
-    TeslaSensorEntityDescription(
-        key="seat_cooler_rear_right",
-        name="Rear Seat Cooler Right",
-        device_class=SensorDeviceClass.ENUM,
-        options=["Off", "Low", "Medium", "High"],
-        value_path="climate_state.seat_cooler_rear_right",
-        icon="mdi:seat-cooler",
-    ),
-    TeslaSensorEntityDescription(
-        key="seat_cooler_rear_center",
-        name="Rear Seat Cooler Center",
-        device_class=SensorDeviceClass.ENUM,
-        options=["Off", "Low", "Medium", "High"],
-        value_path="climate_state.seat_cooler_rear_center",
-        icon="mdi:seat-cooler",
-    ),
-    TeslaSensorEntityDescription(
-        key="steering_wheel_cooler",
-        name="Steering Wheel Cooler",
+        key="wiper_blade_heater",
+        name="Wiper Blade Heater",
         device_class=SensorDeviceClass.ENUM,
         options=["On", "Off"],
         value_path="climate_state.wiper_blade_heater",
         icon="mdi:wiper",
+    ),
+    TeslaSensorEntityDescription(
+        key="is_rear_defroster_on",
+        name="Rear Defroster",
+        device_class=SensorDeviceClass.ENUM,
+        options=["On", "Off"],
+        value_path="climate_state.is_rear_defroster_on",
+        icon="mdi:car-defrost-rear",
     ),
     TeslaSensorEntityDescription(
         key="auto_seat_climate_left",
@@ -740,6 +735,14 @@ SENSOR_DESCRIPTIONS = [
         options=["Locked", "Unlocked"],
         value_path="vehicle_state.locked",
         icon="mdi:lock",
+    ),
+    TeslaSensorEntityDescription(
+        key="valet_mode",
+        name="Valet Mode",
+        device_class=SensorDeviceClass.ENUM,
+        options=["On", "Off"],
+        value_path="vehicle_state.valet_mode",
+        icon="mdi:account-key",
     ),
     TeslaSensorEntityDescription(
         key="sentry_mode",
@@ -978,20 +981,30 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
             return round(value * 1.609344, 1)
         elif conversion == "mph_to_kph" and isinstance(value, (int, float)):
             return round(value * 1.609344, 1)
-        elif conversion == "w_to_kw" and isinstance(value, (int, float)):
-            return round(value / 1000, 2)
-        elif conversion == "wh_to_kwh" and isinstance(value, (int, float)):
-            return round(value / 1000, 2)
         elif conversion == "psi_to_bar" and isinstance(value, (int, float)):
             return round(value * 0.0689476, 2)
 
-        # Handle boolean to enum
+        # Handle boolean / level enums using declared options
         if self.entity_description.device_class == SensorDeviceClass.ENUM:
+            options = self.entity_description.options or []
             if isinstance(value, bool):
-                if self.entity_description.options == ["Locked", "Unlocked"]:
-                    return "Locked" if value else "Unlocked"
+                if len(options) >= 2:
+                    return options[0] if value else options[1]
                 return "On" if value else "Off"
+            if isinstance(value, (int, float)) and options == ["Off", "Low", "Medium", "High"]:
+                level = int(value)
+                if 0 <= level < len(options):
+                    return options[level]
             shift_states = {"D": "Driving", "N": "Neutral", "R": "Reverse", "P": "Parking"}
-            return shift_states.get(str(value), str(value).capitalize())
+            mapped = shift_states.get(str(value))
+            if mapped:
+                return mapped
+            text = str(value)
+            if text in options:
+                return text
+            capitalized = text.capitalize()
+            if capitalized in options:
+                return capitalized
+            return text
 
         return value
