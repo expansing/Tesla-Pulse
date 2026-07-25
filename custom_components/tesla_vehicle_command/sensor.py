@@ -94,7 +94,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=PERCENTAGE,
         value_path="charge_state.charge_limit_soc",
         icon="mdi:battery-charging-50",
-        entity_category=EntityCategory.CONFIG,
+        entity_category=EntityCategory.DIAGNOSTIC,
         default_value=90,
     ),
     TeslaSensorEntityDescription(
@@ -194,7 +194,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         value_path="charge_state.charge_current_request",
         icon="mdi:current-ac",
-        entity_category=EntityCategory.CONFIG,
+        entity_category=EntityCategory.DIAGNOSTIC,
         default_value=0,
     ),
     TeslaSensorEntityDescription(
@@ -205,7 +205,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         value_path="charge_state.charge_current_request_max",
         icon="mdi:current-ac",
-        entity_category=EntityCategory.CONFIG,
+        entity_category=EntityCategory.DIAGNOSTIC,
         default_value=0,
     ),
     TeslaSensorEntityDescription(
@@ -215,7 +215,7 @@ SENSOR_DESCRIPTIONS = [
         options=["Enabled", "Disabled"],
         value_path="charge_state.charge_enable_request",
         icon="mdi:battery-charging",
-        entity_category=EntityCategory.CONFIG,
+        entity_category=EntityCategory.DIAGNOSTIC,
         default_value="Disabled",
     ),
     TeslaSensorEntityDescription(
@@ -290,7 +290,7 @@ SENSOR_DESCRIPTIONS = [
         options=["Off", "Start At", "Depart At"],
         value_path="charge_state.scheduled_charging_mode",
         icon="mdi:calendar-clock",
-        entity_category=EntityCategory.CONFIG,
+        entity_category=EntityCategory.DIAGNOSTIC,
         default_value="Off",
     ),
     TeslaSensorEntityDescription(
@@ -307,7 +307,7 @@ SENSOR_DESCRIPTIONS = [
         name="Scheduled Charging Start Time",
         value_path="charge_state.scheduled_charging_start_time",
         icon="mdi:calendar-clock",
-        entity_category=EntityCategory.CONFIG,
+        entity_category=EntityCategory.DIAGNOSTIC,
         default_value="00:00",
     ),
     TeslaSensorEntityDescription(
@@ -527,7 +527,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         value_path="climate_state.driver_temp_setting",
         icon="mdi:thermostat",
-        entity_category=EntityCategory.CONFIG,
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     TeslaSensorEntityDescription(
         key="passenger_temp_setting",
@@ -537,7 +537,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         value_path="climate_state.passenger_temp_setting",
         icon="mdi:thermostat",
-        entity_category=EntityCategory.CONFIG,
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     TeslaSensorEntityDescription(
         key="is_climate_on",
@@ -568,7 +568,7 @@ SENSOR_DESCRIPTIONS = [
         options=["Off", "Dog", "Camp", "On"],
         value_path="climate_state.climate_keeper_mode",
         icon="mdi:fan",
-        entity_category=EntityCategory.CONFIG,
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     TeslaSensorEntityDescription(
         key="defrost_mode",
@@ -697,7 +697,7 @@ SENSOR_DESCRIPTIONS = [
         options=["Off", "On", "Fan Only"],
         value_path="climate_state.cabin_overheat_protection",
         icon="mdi:thermometer-alert",
-        entity_category=EntityCategory.CONFIG,
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     TeslaSensorEntityDescription(
         key="cop_activation_temp",
@@ -706,7 +706,7 @@ SENSOR_DESCRIPTIONS = [
         options=["Low", "Medium", "High"],
         value_path="climate_state.cop_activation_temperature",
         icon="mdi:thermometer-alert",
-        entity_category=EntityCategory.CONFIG,
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     TeslaSensorEntityDescription(
         key="defrost_for_preconditioning",
@@ -715,7 +715,7 @@ SENSOR_DESCRIPTIONS = [
         options=["On", "Off"],
         value_path="climate_state.defrost_for_preconditioning",
         icon="mdi:wiper",
-        entity_category=EntityCategory.CONFIG,
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
 
     # Drive / Location
