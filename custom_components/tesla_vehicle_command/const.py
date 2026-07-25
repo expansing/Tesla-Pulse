@@ -63,6 +63,8 @@ API_FLEET_TELEMETRY_CONFIG = "/api/1/vehicles/fleet_telemetry_config"
 COMMANDS = {
     "lock": "door_lock",
     "unlock": "door_unlock",
+    "door_lock": "door_lock",
+    "door_unlock": "door_unlock",
     "honk": "honk_horn",
     "flash": "flash_lights",
     "climate_on": "auto_conditioning_start",
@@ -96,6 +98,7 @@ COMMANDS = {
     "media_volume_up": "media_volume_up",
     "media_volume_down": "media_volume_down",
     "remote_start": "remote_start_drive",
+    "remote_start_drive": "remote_start_drive",
     "set_charge_current": "set_charging_amps",
     "open_tonneau": "open_tonneau",
     "close_tonneau": "close_tonneau",
