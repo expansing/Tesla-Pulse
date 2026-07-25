@@ -269,17 +269,7 @@ _FLEET_TELEMETRY_FIELDS = {
     "TpmsPressureFr": {"interval_seconds": 300},
     "TpmsPressureRl": {"interval_seconds": 300},
     "TpmsPressureRr": {"interval_seconds": 300},
-    "SemitruckTpmsPressureRe1L0": {"interval_seconds": 300},
-    "SemitruckTpmsPressureRe1L1": {"interval_seconds": 300},
-    "SemitruckTpmsPressureRe1R0": {"interval_seconds": 300},
-    "SemitruckTpmsPressureRe1R1": {"interval_seconds": 300},
-    "SemitruckTpmsPressureRe2L0": {"interval_seconds": 300},
-    "SemitruckTpmsPressureRe2L1": {"interval_seconds": 300},
-    "SemitruckTpmsPressureRe2R0": {"interval_seconds": 300},
-    "SemitruckTpmsPressureRe2R1": {"interval_seconds": 300},
-    "SemitruckTractorParkBrakeStatus": {"interval_seconds": 60},
-    "SemitruckTrailerParkBrakeStatus": {"interval_seconds": 60},
-    "SemitruckPassengerSeatFoldPosition": {"interval_seconds": 60},
+
     
     # User Preferences
     "Setting24HourTime": {"interval_seconds": 3600},
