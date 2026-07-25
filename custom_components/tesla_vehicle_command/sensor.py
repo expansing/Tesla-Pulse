@@ -40,6 +40,7 @@ class TeslaSensorEntityDescription(SensorEntityDescription):
     unit_path: str | None = None
     conversion: str | None = None
     value_map: dict[Any, str] | None = None
+    default_value: Any = None
 
 
 SENSOR_DESCRIPTIONS = [
@@ -52,6 +53,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=PERCENTAGE,
         value_path="charge_state.battery_level",
         icon="mdi:battery",
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="battery_range",
@@ -62,6 +64,7 @@ SENSOR_DESCRIPTIONS = [
         value_path="charge_state.battery_range",
         conversion="mi_to_km",
         icon="mdi:road",
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="ideal_battery_range",
@@ -72,6 +75,7 @@ SENSOR_DESCRIPTIONS = [
         value_path="charge_state.ideal_battery_range",
         conversion="mi_to_km",
         icon="mdi:road-variant",
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="charging_state",
@@ -80,6 +84,7 @@ SENSOR_DESCRIPTIONS = [
         options=["Charging", "Complete", "Disconnected", "Stopped", "NoPower", "Starting"],
         value_path="charge_state.charging_state",
         icon="mdi:ev-station",
+        default_value="Disconnected",
     ),
     TeslaSensorEntityDescription(
         key="charge_limit",
@@ -89,6 +94,8 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=PERCENTAGE,
         value_path="charge_state.charge_limit_soc",
         icon="mdi:battery-charging-50",
+        entity_category=EntityCategory.CONFIG,
+        default_value=90,
     ),
     TeslaSensorEntityDescription(
         key="charge_current",
@@ -98,6 +105,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         value_path="charge_state.charge_current_request",
         icon="mdi:current-ac",
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="charge_power",
@@ -107,6 +115,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
         value_path="charge_state.charger_power",
         icon="mdi:flash",
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="charge_energy_added",
@@ -116,6 +125,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         value_path="charge_state.charge_energy_added",
         icon="mdi:battery-plus",
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="time_to_full_charge",
@@ -125,6 +135,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement="h",
         value_path="charge_state.time_to_full_charge",
         icon="mdi:timer",
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="charger_voltage",
@@ -134,6 +145,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfElectricPotential.VOLT,
         value_path="charge_state.charger_voltage",
         icon="mdi:flash",
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="charger_actual_current",
@@ -143,6 +155,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         value_path="charge_state.charger_actual_current",
         icon="mdi:current-ac",
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="est_battery_range",
@@ -162,6 +175,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=PERCENTAGE,
         value_path="charge_state.usable_battery_level",
         icon="mdi:battery",
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="charge_port_door_open",
@@ -170,6 +184,7 @@ SENSOR_DESCRIPTIONS = [
         options=["Open", "Closed"],
         value_path="charge_state.charge_port_door_open",
         icon="mdi:ev-plug-type2",
+        default_value="Closed",
     ),
     TeslaSensorEntityDescription(
         key="charge_current_request",
@@ -179,6 +194,8 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         value_path="charge_state.charge_current_request",
         icon="mdi:current-ac",
+        entity_category=EntityCategory.CONFIG,
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="charge_current_request_max",
@@ -188,6 +205,8 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         value_path="charge_state.charge_current_request_max",
         icon="mdi:current-ac",
+        entity_category=EntityCategory.CONFIG,
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="charge_enable_request",
@@ -196,6 +215,8 @@ SENSOR_DESCRIPTIONS = [
         options=["Enabled", "Disabled"],
         value_path="charge_state.charge_enable_request",
         icon="mdi:battery-charging",
+        entity_category=EntityCategory.CONFIG,
+        default_value="Disabled",
     ),
     TeslaSensorEntityDescription(
         key="charge_port_latch",
@@ -204,6 +225,7 @@ SENSOR_DESCRIPTIONS = [
         options=["Engaged", "Disengaged", "Unknown"],
         value_path="charge_state.charge_port_latch",
         icon="mdi:ev-plug-type2",
+        default_value="Unknown",
     ),
     TeslaSensorEntityDescription(
         key="charge_rate",
@@ -214,6 +236,7 @@ SENSOR_DESCRIPTIONS = [
         value_path="charge_state.charge_rate",
         conversion="mi_to_km",
         icon="mdi:speedometer",
+        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="charger_phases",
@@ -222,14 +245,16 @@ SENSOR_DESCRIPTIONS = [
         options=["1", "2", "3"],
         value_path="charge_state.charger_phases",
         icon="mdi:flash",
+        default_value="1",
     ),
     TeslaSensorEntityDescription(
         key="charging_cable_type",
         name="Charging Cable Type",
         device_class=SensorDeviceClass.ENUM,
-        options=["Invalid", "SAE J1772", "Tesla", "Type 2", "CCS", "NACS"],
+        options=["Unknown", "IEC", "SAE", "GB_AC", "GB_DC", "SNA"],
         value_path="charge_state.conn_charge_cable",
         icon="mdi:ev-plug-type2",
+        default_value="Unknown",
     ),
     TeslaSensorEntityDescription(
         key="fast_charger_present",
@@ -238,14 +263,16 @@ SENSOR_DESCRIPTIONS = [
         options=["Present", "Not Present"],
         value_path="charge_state.fast_charger_present",
         icon="mdi:ev-station",
+        default_value="Not Present",
     ),
     TeslaSensorEntityDescription(
         key="fast_charger_type",
         name="Fast Charger Type",
         device_class=SensorDeviceClass.ENUM,
-        options=["Invalid", "Supercharger", "Destination Charger", "Other"],
+        options=["Unknown", "Supercharger", "CHAdeMO", "GB", "ACSingleWireCAN", "Combo", "MCSingleWireCAN", "Other", "SNA"],
         value_path="charge_state.fast_charger_type",
         icon="mdi:ev-station",
+        default_value="Unknown",
     ),
     TeslaSensorEntityDescription(
         key="not_enough_power_to_heat",
@@ -254,6 +281,7 @@ SENSOR_DESCRIPTIONS = [
         options=["Yes", "No"],
         value_path="charge_state.not_enough_power_to_heat",
         icon="mdi:battery-alert",
+        default_value="No",
     ),
     TeslaSensorEntityDescription(
         key="scheduled_charging_mode",
@@ -262,6 +290,8 @@ SENSOR_DESCRIPTIONS = [
         options=["Off", "Start At", "Depart At"],
         value_path="charge_state.scheduled_charging_mode",
         icon="mdi:calendar-clock",
+        entity_category=EntityCategory.CONFIG,
+        default_value="Off",
     ),
     TeslaSensorEntityDescription(
         key="scheduled_charging_pending",
@@ -270,12 +300,15 @@ SENSOR_DESCRIPTIONS = [
         options=["Pending", "Not Pending"],
         value_path="charge_state.scheduled_charging_pending",
         icon="mdi:calendar-clock",
+        default_value="Not Pending",
     ),
     TeslaSensorEntityDescription(
         key="scheduled_charging_start_time",
         name="Scheduled Charging Start Time",
         value_path="charge_state.scheduled_charging_start_time",
         icon="mdi:calendar-clock",
+        entity_category=EntityCategory.CONFIG,
+        default_value="00:00",
     ),
     TeslaSensorEntityDescription(
         key="supercharger_session_trip_planner",
@@ -284,7 +317,8 @@ SENSOR_DESCRIPTIONS = [
         options=["Yes", "No"],
         value_path="charge_state.supercharger_session_trip_planner",
         icon="mdi:ev-station",
-    ),
+        default_value="No",
+    ),,
     TeslaSensorEntityDescription(
         key="battery_heater_on",
         name="Battery Heater On",
@@ -493,6 +527,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         value_path="climate_state.driver_temp_setting",
         icon="mdi:thermostat",
+        entity_category=EntityCategory.CONFIG,
     ),
     TeslaSensorEntityDescription(
         key="passenger_temp_setting",
@@ -502,6 +537,7 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         value_path="climate_state.passenger_temp_setting",
         icon="mdi:thermostat",
+        entity_category=EntityCategory.CONFIG,
     ),
     TeslaSensorEntityDescription(
         key="is_climate_on",
@@ -532,12 +568,13 @@ SENSOR_DESCRIPTIONS = [
         options=["Off", "Dog", "Camp", "On"],
         value_path="climate_state.climate_keeper_mode",
         icon="mdi:fan",
+        entity_category=EntityCategory.CONFIG,
     ),
     TeslaSensorEntityDescription(
         key="defrost_mode",
         name="Defrost Mode",
         device_class=SensorDeviceClass.ENUM,
-        options=["On", "Off"],
+        options=["Unknown", "Off", "Normal", "Max", "AutoDefog"],
         value_path="climate_state.defrost_mode",
         icon="mdi:car-defrost-front",
     ),
@@ -660,6 +697,7 @@ SENSOR_DESCRIPTIONS = [
         options=["Off", "On", "Fan Only"],
         value_path="climate_state.cabin_overheat_protection",
         icon="mdi:thermometer-alert",
+        entity_category=EntityCategory.CONFIG,
     ),
     TeslaSensorEntityDescription(
         key="cop_activation_temp",
@@ -668,6 +706,7 @@ SENSOR_DESCRIPTIONS = [
         options=["Low", "Medium", "High"],
         value_path="climate_state.cop_activation_temperature",
         icon="mdi:thermometer-alert",
+        entity_category=EntityCategory.CONFIG,
     ),
     TeslaSensorEntityDescription(
         key="defrost_for_preconditioning",
@@ -676,6 +715,7 @@ SENSOR_DESCRIPTIONS = [
         options=["On", "Off"],
         value_path="climate_state.defrost_for_preconditioning",
         icon="mdi:wiper",
+        entity_category=EntityCategory.CONFIG,
     ),
 
     # Drive / Location
@@ -735,6 +775,7 @@ SENSOR_DESCRIPTIONS = [
         options=["Locked", "Unlocked"],
         value_path="vehicle_state.locked",
         icon="mdi:lock",
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     TeslaSensorEntityDescription(
         key="valet_mode",
@@ -743,6 +784,7 @@ SENSOR_DESCRIPTIONS = [
         options=["On", "Off"],
         value_path="vehicle_state.valet_mode",
         icon="mdi:account-key",
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     TeslaSensorEntityDescription(
         key="sentry_mode",
@@ -751,6 +793,7 @@ SENSOR_DESCRIPTIONS = [
         options=["On", "Off"],
         value_path="vehicle_state.sentry_mode",
         icon="mdi:shield-car",
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     TeslaSensorEntityDescription(
         key="fd_window",
@@ -819,6 +862,7 @@ SENSOR_DESCRIPTIONS = [
         name="Software Version",
         value_path="vehicle_state.car_version",
         icon="mdi:package-variant",
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     TeslaSensorEntityDescription(
         key="tpms_fl",
@@ -855,6 +899,137 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfPressure.BAR,
         value_path="vehicle_state.tpms_pressure_rr",
         icon="mdi:car-tire-alert",
+    ),
+
+    # Media
+    TeslaSensorEntityDescription(
+        key="media_playback_status",
+        name="Media Playback Status",
+        value_path="media_info.media_playback_status",
+        icon="mdi:music",
+    ),
+    TeslaSensorEntityDescription(
+        key="media_now_playing_title",
+        name="Now Playing Title",
+        value_path="media_info.now_playing_title",
+        icon="mdi:music-note",
+    ),
+    TeslaSensorEntityDescription(
+        key="media_now_playing_artist",
+        name="Now Playing Artist",
+        value_path="media_info.now_playing_artist",
+        icon="mdi:artist",
+    ),
+    TeslaSensorEntityDescription(
+        key="media_now_playing_album",
+        name="Now Playing Album",
+        value_path="media_info.now_playing_album",
+        icon="mdi:album",
+    ),
+    TeslaSensorEntityDescription(
+        key="media_now_playing_station",
+        name="Now Playing Station",
+        value_path="media_info.now_playing_station",
+        icon="mdi:radio",
+    ),
+    TeslaSensorEntityDescription(
+        key="media_audio_volume",
+        name="Media Volume",
+        value_path="media_info.audio_volume",
+        icon="mdi:volume-high",
+    ),
+
+    # Powertrain (Diagnostic)
+    TeslaSensorEntityDescription(
+        key="di_state_f",
+        name="Drive Inverter State Front",
+        value_path="powertrain.di_state_f",
+        icon="mdi:car-electric",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    TeslaSensorEntityDescription(
+        key="di_state_r",
+        name="Drive Inverter State Rear",
+        value_path="powertrain.di_state_r",
+        icon="mdi:car-electric",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    TeslaSensorEntityDescription(
+        key="di_motor_current_f",
+        name="Motor Current Front",
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        value_path="powertrain.di_motor_current_f",
+        icon="mdi:current-ac",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    TeslaSensorEntityDescription(
+        key="di_motor_current_r",
+        name="Motor Current Rear",
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        value_path="powertrain.di_motor_current_r",
+        icon="mdi:current-ac",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    TeslaSensorEntityDescription(
+        key="di_stator_temp_f",
+        name="Stator Temp Front",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        value_path="powertrain.di_stator_temp_f",
+        icon="mdi:thermometer",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    TeslaSensorEntityDescription(
+        key="di_stator_temp_r",
+        name="Stator Temp Rear",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        value_path="powertrain.di_stator_temp_r",
+        icon="mdi:thermometer",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    TeslaSensorEntityDescription(
+        key="hvil_status",
+        name="HVIL Status",
+        value_path="powertrain.hvil_status",
+        icon="mdi:shield-alert",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+
+    # Vehicle Config (Diagnostic)
+    TeslaSensorEntityDescription(
+        key="car_type",
+        name="Car Type",
+        value_path="vehicle_config.car_type",
+        icon="mdi:car",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    TeslaSensorEntityDescription(
+        key="exterior_color",
+        name="Exterior Color",
+        value_path="vehicle_config.exterior_color",
+        icon="mdi:palette",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    TeslaSensorEntityDescription(
+        key="wheel_type",
+        name="Wheel Type",
+        value_path="vehicle_config.wheel_type",
+        icon="mdi:car-tire",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    TeslaSensorEntityDescription(
+        key="charge_port_type",
+        name="Charge Port Type",
+        value_path="vehicle_config.charge_port_type",
+        icon="mdi:ev-plug-type2",
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
 ]
 
@@ -956,6 +1131,8 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
                     return None
 
         if value is None:
+            if self.entity_description.default_value is not None:
+                return self.entity_description.default_value
             if self.entity_description.key == "shift_state":
                 return "Parking"
             return None
