@@ -194,6 +194,9 @@ class TelemetryConsumer:
         response.setdefault("climate_state", {})
         response.setdefault("vehicle_state", {})
         response.setdefault("drive_state", {})
+        response.setdefault("media_info", {})
+        response.setdefault("powertrain", {})
+        response.setdefault("vehicle_config", {})
 
         # Map requested Fleet Telemetry signals to the Fleet API state structure.
         signal_mapping = {
