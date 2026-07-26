@@ -1511,6 +1511,11 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
                 level = int(value)
                 if 0 <= level < len(options):
                     return options[level]
+            # Handle defrost_mode numeric values (0=Unknown, 1=Off, 2=Normal, 3=Max, 4=AutoDefog)
+            if isinstance(value, (int, float)) and options == ["Unknown", "Off", "Normal", "Max", "AutoDefog"]:
+                level = int(value)
+                if 0 <= level < len(options):
+                    return options[level]
             shift_states = {"D": "Driving", "N": "Neutral", "R": "Reverse", "P": "Parking"}
             mapped = shift_states.get(str(value))
             if mapped:
