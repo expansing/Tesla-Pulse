@@ -296,8 +296,8 @@ class TelemetryConsumer:
             "WiperHeatEnabled": (("climate_state", "wiper_blade_heater", self._is_truthy),),
             "AutoSeatClimateLeft": (("climate_state", "auto_seat_climate_left", self._is_truthy),),
             "AutoSeatClimateRight": (("climate_state", "auto_seat_climate_right", self._is_truthy),),
-            "CabinOverheatProtectionMode": (("climate_state", "cabin_overheat_protection", None),),
-            "CabinOverheatProtectionTemperatureLimit": (("climate_state", "cop_activation_temperature", None),),
+            "CabinOverheatProtectionMode": (("climate_state", "cabin_overheat_protection", self._cabin_overheat_protection),),
+            "CabinOverheatProtectionTemperatureLimit": (("climate_state", "cop_activation_temperature", self._cop_activation_temp),),
             "DefrostForPreconditioning": (("climate_state", "defrost_for_preconditioning", self._is_truthy),),
             
             # Vehicle State
@@ -553,6 +553,52 @@ class TelemetryConsumer:
             {"ACChargingEnergyIn", "DCChargingEnergyIn"} & received_fields
         )
 
+        # Calculate brick voltage imbalance from max/min
+        brick_max = charge_state.get("brick_voltage_max")
+        brick_min = charge_state.get("brick_voltage_min")
+        if isinstance(brick_max, (int, float)) and isinstance(brick_min, (int, float)):
+            charge_state["brick_voltage_imbalance"] = brick_max - brick_min
+
+        # Calculate battery balance score (0-100%) - SOC-aware
+        # Based on imbalance thresholds that vary by SOC:
+        # SOC >= 90%: <=10mV=Excellent(100%), <=20mV=Good(85%), <=30mV=Watch(70%), >30mV=Warning(55%)
+        # SOC >= 50%: <=20mV=Excellent(100%), <=30mV=Good(85%), <=50mV=Watch(70%), >50mV=Warning(55%)
+        # SOC < 50%:  <=40mV=Excellent(100%), <=80mV=Good(85%), <=120mV=Watch(70%), >120mV=Warning(55%)
+        imbalance = charge_state.get("brick_voltage_imbalance")
+        soc = charge_state.get("battery_level") or charge_state.get("usable_battery_level")
+        if isinstance(imbalance, (int, float)) and isinstance(soc, (int, float)):
+            if soc >= 90:
+                # Near full charge - tightest thresholds
+                if imbalance <= 10:
+                    score = 100
+                elif imbalance <= 20:
+                    score = 85
+                elif imbalance <= 30:
+                    score = 70
+                else:
+                    score = 55
+            elif soc >= 50:
+                # Mid-range SOC
+                if imbalance <= 20:
+                    score = 100
+                elif imbalance <= 30:
+                    score = 85
+                elif imbalance <= 50:
+                    score = 70
+                else:
+                    score = 55
+            else:
+                # Low SOC - wider thresholds
+                if imbalance <= 40:
+                    score = 100
+                elif imbalance <= 80:
+                    score = 85
+                elif imbalance <= 120:
+                    score = 70
+                else:
+                    score = 55
+            charge_state["battery_balance_score"] = score
+
     @classmethod
     def _apply_door_state(
         cls,
@@ -648,6 +694,26 @@ class TelemetryConsumer:
         if marker >= 0:
             text = text[marker + len("State"):]
         return text.strip() or "Unknown"
+
+    def _cabin_overheat_protection(self, value: Any) -> str:
+        """Normalize a cabin overheat protection mode enum."""
+        text = str(value)
+        # Handle "CabinOverheatProtectionModeStateOff" -> "Off", "CabinOverheatProtectionModeStateOn" -> "On", etc.
+        if text.startswith("CabinOverheatProtectionMode"):
+            text = text[len("CabinOverheatProtectionMode"):]
+        # Also handle "State" suffix if present
+        marker = text.rfind("State")
+        if marker >= 0:
+            text = text[marker + len("State"):]
+        return text.strip() or "Off"
+
+    def _cop_activation_temp(self, value: Any) -> str:
+        """Normalize a COP activation temperature enum."""
+        text = str(value)
+        # Handle "ClimateOverheatProtectionTempLimitLow" -> "Low", etc.
+        if text.startswith("ClimateOverheatProtectionTempLimit"):
+            text = text[len("ClimateOverheatProtectionTempLimit"):]
+        return text.strip() or "Low"
 
     def _pack_voltage(self, value: Any) -> float | None:
         """Filter out transient low-voltage readings during vehicle wake-up.
