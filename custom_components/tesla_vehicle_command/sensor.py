@@ -26,6 +26,7 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
@@ -1361,6 +1362,21 @@ async def async_setup_entry(
     """Set up sensor entities."""
     coordinator: TeslaVehicleCommandCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
 
+    # Clean up orphaned entities from previous versions
+    entity_registry = er.async_get(hass)
+    current_keys = {desc.key for desc in SENSOR_DESCRIPTIONS}
+    current_keys.add("telemetry_status")  # TeslaTelemetryStatusSensor
+
+    for vehicle in coordinator.vehicles:
+        vin = vehicle["vin"]
+        # Remove entities that are no longer defined
+        for entity_entry in er.async_entries_for_config_entry(entity_registry, entry.entry_id):
+            if entity_entry.unique_id.startswith(f"{vin}_"):
+                sensor_key = entity_entry.unique_id[len(vin) + 1:]
+                if sensor_key not in current_keys:
+                    _LOGGER.info("Removing orphaned sensor entity: %s", entity_entry.entity_id)
+                    entity_registry.async_remove(entity_entry.entity_id)
+
     entities = []
     for vehicle in coordinator.vehicles:
         vin = vehicle["vin"]
@@ -1523,6 +1539,21 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
                 marker = text.rfind("State")
                 if marker >= 0:
                     text = text[marker + len("State"):]
+                text = text.strip()
+                if text in options:
+                    return text
+            # CabinOverheatProtectionMode: "CabinOverheatProtectionModeStateOff" -> "Off", "CabinOverheatProtectionModeStateOn" -> "On", "CabinOverheatProtectionModeStateFanOnly" -> "Fan Only"
+            if text.startswith("CabinOverheatProtectionMode"):
+                text = text[len("CabinOverheatProtectionMode"):]
+                marker = text.rfind("State")
+                if marker >= 0:
+                    text = text[marker + len("State"):]
+                text = text.strip()
+                if text in options:
+                    return text
+            # ClimateOverheatProtectionTempLimit: "ClimateOverheatProtectionTempLimitLow" -> "Low", etc.
+            if text.startswith("ClimateOverheatProtectionTempLimit"):
+                text = text[len("ClimateOverheatProtectionTempLimit"):]
                 text = text.strip()
                 if text in options:
                     return text
