@@ -226,9 +226,9 @@ class TelemetryConsumer:
             "ChargePortLatch": (("charge_state", "charge_port_latch", None),),
             "ChargeRateMilePerHour": (("charge_state", "charge_rate", self._to_float),),
             "ChargerPhases": (("charge_state", "charger_phases", self._to_int),),
-            "ChargingCableType": (("charge_state", "conn_charge_cable", None),),
+            "ChargingCableType": (("charge_state", "conn_charge_cable", self._charging_cable_type),),
             "FastChargerPresent": (("charge_state", "fast_charger_present", self._is_truthy),),
-            "FastChargerType": (("charge_state", "fast_charger_type", None),),
+            "FastChargerType": (("charge_state", "fast_charger_type", self._fast_charger_type),),
             "NotEnoughPowerToHeat": (("charge_state", "not_enough_power_to_heat", self._is_truthy),),
             "ScheduledChargingMode": (("charge_state", "scheduled_charging_mode", self._scheduled_charging_mode),),
             "ScheduledChargingPending": (("charge_state", "scheduled_charging_pending", self._is_truthy),),
@@ -723,6 +723,22 @@ class TelemetryConsumer:
         if text.startswith("ClimateOverheatProtectionTempLimit"):
             text = text[len("ClimateOverheatProtectionTempLimit"):]
         return text.strip() or "Low"
+
+    def _charging_cable_type(self, value: Any) -> str:
+        """Normalize a charging cable type enum."""
+        text = str(value)
+        # Handle "ChargingCableTypeIEC" -> "IEC", "ChargingCableTypeSAE" -> "SAE", etc.
+        if text.startswith("ChargingCableType"):
+            text = text[len("ChargingCableType"):]
+        return text.strip() or "Unknown"
+
+    def _fast_charger_type(self, value: Any) -> str:
+        """Normalize a fast charger type enum."""
+        text = str(value)
+        # Handle "FastChargerTypeSupercharger" -> "Supercharger", etc.
+        if text.startswith("FastChargerType"):
+            text = text[len("FastChargerType"):]
+        return text.strip() or "Unknown"
 
     def _pack_voltage(self, value: Any) -> float | None:
         """Filter out transient low-voltage readings during vehicle wake-up.

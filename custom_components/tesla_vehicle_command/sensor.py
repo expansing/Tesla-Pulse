@@ -1561,6 +1561,18 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
                 text = text.strip()
                 if text in options:
                     return text
+            # ChargingCableType: "ChargingCableTypeIEC" -> "IEC", "ChargingCableTypeSAE" -> "SAE", etc.
+            if text.startswith("ChargingCableType"):
+                text = text[len("ChargingCableType"):]
+                text = text.strip()
+                if text in options:
+                    return text
+            # FastChargerType: "FastChargerTypeSupercharger" -> "Supercharger", etc.
+            if text.startswith("FastChargerType"):
+                text = text[len("FastChargerType"):]
+                text = text.strip()
+                if text in options:
+                    return text
             capitalized = text.capitalize()
             if capitalized in options:
                 return capitalized
