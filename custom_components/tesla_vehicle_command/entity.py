@@ -27,18 +27,12 @@ class TeslaVehicleCommandEntity(CoordinatorEntity[TeslaVehicleCommandCoordinator
     @property
     def device_info(self) -> DeviceInfo:
         """Return device info."""
-        vehicle_data = self.coordinator.data.get(self.vin, {})
-        response = vehicle_data.get("response", {})
-        charge_state = response.get("charge_state", {})
-        battery_level = charge_state.get("battery_level")
-        
         return DeviceInfo(
             identifiers={("tesla_vehicle_command", self.vin)},
             name=self._vehicle_name,
             manufacturer="Tesla",
             model="Vehicle",
             sw_version="1.0",
-            battery_level=battery_level if isinstance(battery_level, (int, float)) else None,
         )
 
     @property
