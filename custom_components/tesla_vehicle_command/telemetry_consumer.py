@@ -389,10 +389,10 @@ class TelemetryConsumer:
             "DiStateR": (("powertrain", "di_state_r", None),),
             "DiStateREL": (("powertrain", "di_state_rel", None),),
             "DiStateRER": (("powertrain", "di_state_rer", None),),
-            "DiAxleSpeedF": (("powertrain", "di_axle_speed_f", None),),
-            "DiAxleSpeedR": (("powertrain", "di_axle_speed_r", None),),
-            "DiAxleSpeedREL": (("powertrain", "di_axle_speed_rel", None),),
-            "DiAxleSpeedRER": (("powertrain", "di_axle_speed_rer", None),),
+            "DiAxleSpeedF": (("powertrain", "di_axle_speed_f", self._axle_speed_to_kmh),),
+            "DiAxleSpeedR": (("powertrain", "di_axle_speed_r", self._axle_speed_to_kmh),),
+            "DiAxleSpeedREL": (("powertrain", "di_axle_speed_rel", self._axle_speed_to_kmh),),
+            "DiAxleSpeedRER": (("powertrain", "di_axle_speed_rer", self._axle_speed_to_kmh),),
             "DiMotorCurrentF": (("powertrain", "di_motor_current_f", None),),
             "DiMotorCurrentR": (("powertrain", "di_motor_current_r", None),),
             "DiMotorCurrentREL": (("powertrain", "di_motor_current_rel", None),),
@@ -630,6 +630,29 @@ class TelemetryConsumer:
         """Convert telemetry numeric values to Fleet API integer fields."""
         try:
             return int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _to_float(value: Any) -> float | None:
+        """Convert telemetry numeric values to float fields."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _axle_speed_to_kmh(value: Any) -> float | None:
+        """Convert axle speed from RPM to km/h.
+        
+        Telemetry provides axle speed in RPM. Convert to km/h using typical
+        tire circumference. Formula: km/h = RPM * circumference_m * 60 / 1000
+        Using ~2.1m tire circumference for typical Tesla tires.
+        """
+        try:
+            rpm = float(value)
+            # Typical Tesla tire circumference ~2.1m
+            return round(rpm * 2.1 * 60 / 1000, 1)
         except (TypeError, ValueError):
             return None
 

@@ -1528,6 +1528,9 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
                 text = text.strip().lower()
                 if text in options:
                     return text
+            # Handle invalid/unknown values
+            if text.lower() in ("<invalid>", "invalid", "unknown", "none"):
+                return None
             # ClimateKeeperMode: "ClimateKeeperModeStateOff" -> "off", "ClimateKeeperModeStateDog" -> "dog"
             if text.startswith("ClimateKeeperMode"):
                 text = text[len("ClimateKeeperMode"):]

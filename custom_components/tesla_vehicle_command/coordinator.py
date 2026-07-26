@@ -467,9 +467,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             set(),  # processed_fields
         )
         
-        # Note: _apply_door_state is not needed for Fleet API responses
-        # as the Fleet API already returns individual door states (df, dr, pf, pr, ft, rt)
-        # _apply_door_state is only needed for telemetry's composite DoorState signal
+        # Apply door state expansion for Fleet API responses
+        # Fleet API may return composite DoorState that needs expansion
+        self._apply_door_state(processed, {}, set())
         
         return processed
 
@@ -536,23 +536,32 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         processed_fields: set[str],
     ) -> None:
         """Expand the composite DoorState signal into Fleet API door fields."""
+        # Handle telemetry format: signals = {"DoorState": {"DriverFront": 1, ...}}
         doors = signals.get("DoorState")
-        if not isinstance(doors, dict):
+        if isinstance(doors, dict):
+            door_mapping = {
+                "DriverFront": "df",
+                "DriverRear": "dr",
+                "PassengerFront": "pf",
+                "PassengerRear": "pr",
+                "TrunkFront": "ft",
+                "TrunkRear": "rt",
+            }
+            vehicle_state = response.setdefault("vehicle_state", {})
+            for telemetry_key, state_key in door_mapping.items():
+                if telemetry_key in doors:
+                    # Convert 0/1 to "Closed"/"Open" for ENUM sensors
+                    vehicle_state[state_key] = "Open" if self._is_truthy(doors[telemetry_key]) else "Closed"
+            processed_fields.add("DoorState")
             return
-        door_mapping = {
-            "DriverFront": "df",
-            "DriverRear": "dr",
-            "PassengerFront": "pf",
-            "PassengerRear": "pr",
-            "TrunkFront": "ft",
-            "TrunkRear": "rt",
-        }
-        vehicle_state = response.setdefault("vehicle_state", {})
-        for telemetry_key, state_key in door_mapping.items():
-            if telemetry_key in doors:
-                # Convert 0/1 to "Closed"/"Open" for ENUM sensors
-                vehicle_state[state_key] = "Open" if self._is_truthy(doors[telemetry_key]) else "Closed"
-        processed_fields.add("DoorState")
+        
+        # Handle Fleet API format: response already has individual door states (df, dr, pf, pr, ft, rt)
+        # Just ensure they're converted to "Open"/"Closed" strings for ENUM sensors
+        vehicle_state = response.get("vehicle_state", {})
+        door_keys = ["df", "dr", "pf", "pr", "ft", "rt"]
+        for key in door_keys:
+            if key in vehicle_state:
+                vehicle_state[key] = "Open" if self._is_truthy(vehicle_state[key]) else "Closed"
 
     @staticmethod
     def _is_truthy(value: Any) -> bool:
