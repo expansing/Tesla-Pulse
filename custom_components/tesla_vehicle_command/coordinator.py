@@ -214,19 +214,6 @@ _FLEET_TELEMETRY_FIELDS = {
     "LocatedAtHome": {"interval_seconds": 60},
     "LocatedAtWork": {"interval_seconds": 60},
     
-    # Media
-    "MediaPlaybackStatus": {"interval_seconds": 60},
-    "MediaPlaybackSource": {"interval_seconds": 60},
-    "MediaNowPlayingTitle": {"interval_seconds": 60},
-    "MediaNowPlayingArtist": {"interval_seconds": 60},
-    "MediaNowPlayingAlbum": {"interval_seconds": 60},
-    "MediaNowPlayingStation": {"interval_seconds": 60},
-    "MediaNowPlayingDuration": {"interval_seconds": 60},
-    "MediaNowPlayingElapsed": {"interval_seconds": 60},
-    "MediaAudioVolume": {"interval_seconds": 60},
-    "MediaAudioVolumeIncrement": {"interval_seconds": 60},
-    "MediaAudioVolumeMax": {"interval_seconds": 60},
-    
     # Powertrain
     "DiStateF": {"interval_seconds": 60},
     "DiStateR": {"interval_seconds": 60},

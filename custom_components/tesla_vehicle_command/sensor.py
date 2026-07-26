@@ -356,15 +356,6 @@ SENSOR_DESCRIPTIONS = [
         icon="mdi:battery",
     ),
     TeslaSensorEntityDescription(
-        key="lifetime_energy_used_drive",
-        name="Lifetime Energy Used Drive",
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        value_path="charge_state.lifetime_energy_used_drive",
-        icon="mdi:battery",
-    ),
-    TeslaSensorEntityDescription(
         key="pack_current",
         name="Pack Current",
         device_class=SensorDeviceClass.CURRENT,
@@ -928,80 +919,6 @@ SENSOR_DESCRIPTIONS = [
         icon="mdi:car-tire-alert",
     ),
 
-    # Media
-    TeslaSensorEntityDescription(
-        key="media_playback_status",
-        name="Media Playback Status",
-        value_path="media_info.media_playback_status",
-        icon="mdi:music",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_playback_source",
-        name="Media Playback Source",
-        value_path="media_info.now_playing_source",
-        icon="mdi:music-box",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_now_playing_title",
-        name="Now Playing Title",
-        value_path="media_info.now_playing_title",
-        icon="mdi:music-note",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_now_playing_artist",
-        name="Now Playing Artist",
-        value_path="media_info.now_playing_artist",
-        icon="mdi:artist",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_now_playing_album",
-        name="Now Playing Album",
-        value_path="media_info.now_playing_album",
-        icon="mdi:album",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_now_playing_station",
-        name="Now Playing Station",
-        value_path="media_info.now_playing_station",
-        icon="mdi:radio",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_now_playing_duration",
-        name="Now Playing Duration",
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
-        value_path="media_info.now_playing_duration",
-        icon="mdi:timer",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_now_playing_elapsed",
-        name="Now Playing Elapsed",
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
-        value_path="media_info.now_playing_elapsed",
-        icon="mdi:timer",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_audio_volume",
-        name="Media Volume",
-        value_path="media_info.audio_volume",
-        icon="mdi:volume-high",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_audio_volume_increment",
-        name="Media Volume Increment",
-        value_path="media_info.audio_volume_increment",
-        icon="mdi:volume-high",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_audio_volume_max",
-        name="Media Volume Max",
-        value_path="media_info.audio_volume_max",
-        icon="mdi:volume-high",
-    ),
-
     # Powertrain (Diagnostic)
     TeslaSensorEntityDescription(
         key="di_state_f",
@@ -1562,6 +1479,34 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
             text = str(value)
             if text in options:
                 return text
+            # Handle raw Fleet API enum values (e.g., "ScheduledChargingModeOff", "ClimateKeeperModeStateOff", "DefrostModeStateOff")
+            # ScheduledChargingMode: "ScheduledChargingModeOff" -> "off", "ScheduledChargingModeStartAt" -> "start_at"
+            if text.startswith("ScheduledChargingMode"):
+                text = text[len("ScheduledChargingMode"):]
+                marker = text.rfind("State")
+                if marker >= 0:
+                    text = text[marker + len("State"):]
+                text = text.strip().lower()
+                if text in options:
+                    return text
+            # ClimateKeeperMode: "ClimateKeeperModeStateOff" -> "off", "ClimateKeeperModeStateDog" -> "dog"
+            if text.startswith("ClimateKeeperMode"):
+                text = text[len("ClimateKeeperMode"):]
+                marker = text.rfind("State")
+                if marker >= 0:
+                    text = text[marker + len("State"):]
+                text = text.strip().lower()
+                if text in options:
+                    return text
+            # DefrostMode: "DefrostModeStateOff" -> "Off", "DefrostModeStateNormal" -> "Normal"
+            if text.startswith("DefrostMode"):
+                text = text[len("DefrostMode"):]
+                marker = text.rfind("State")
+                if marker >= 0:
+                    text = text[marker + len("State"):]
+                text = text.strip()
+                if text in options:
+                    return text
             capitalized = text.capitalize()
             if capitalized in options:
                 return capitalized
