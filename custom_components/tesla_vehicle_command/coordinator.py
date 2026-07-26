@@ -214,19 +214,6 @@ _FLEET_TELEMETRY_FIELDS = {
     "LocatedAtHome": {"interval_seconds": 60},
     "LocatedAtWork": {"interval_seconds": 60},
     
-    # Media
-    "MediaPlaybackStatus": {"interval_seconds": 60},
-    "MediaPlaybackSource": {"interval_seconds": 60},
-    "MediaNowPlayingTitle": {"interval_seconds": 60},
-    "MediaNowPlayingArtist": {"interval_seconds": 60},
-    "MediaNowPlayingAlbum": {"interval_seconds": 60},
-    "MediaNowPlayingStation": {"interval_seconds": 60},
-    "MediaNowPlayingDuration": {"interval_seconds": 60},
-    "MediaNowPlayingElapsed": {"interval_seconds": 60},
-    "MediaAudioVolume": {"interval_seconds": 60},
-    "MediaAudioVolumeIncrement": {"interval_seconds": 60},
-    "MediaAudioVolumeMax": {"interval_seconds": 60},
-    
     # Powertrain
     "DiStateF": {"interval_seconds": 60},
     "DiStateR": {"interval_seconds": 60},
@@ -457,12 +444,143 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if raw_signals is not None:
             self._telemetry_raw_signals[vin] = dict(raw_signals)
 
+        # Process the response to compute derived fields (imbalance, balance score, door states)
+        processed_response = self._process_vehicle_response(response)
+
         updated_data = dict(self.data or self._empty_telemetry_data())
-        updated_data[vin] = {"response": response}
+        updated_data[vin] = {"response": processed_response}
         self.async_set_updated_data(updated_data)
         self._telemetry_store.async_delay_save(
             self._telemetry_store_payload, 30
         )
+
+    def _process_vehicle_response(self, response: dict[str, Any]) -> dict[str, Any]:
+        """Process vehicle response to compute derived fields."""
+        # Create a copy to avoid modifying the original
+        processed = dict(response)
+        
+        # Apply charging composites (imbalance, balance score)
+        self._apply_charging_composites(
+            processed,
+            {},  # last_signals not available for Fleet API response
+            set(),  # received_fields
+            set(),  # processed_fields
+        )
+        
+        # Apply door state expansion for Fleet API responses
+        # Fleet API may return composite DoorState that needs expansion
+        self._apply_door_state(processed, {}, set())
+        
+        return processed
+
+    def _apply_charging_composites(
+        self,
+        response: dict[str, Any],
+        last_signals: dict[str, Any],
+        received_fields: set[str],
+        processed_fields: set[str],
+    ) -> None:
+        """Derive charge values and compute battery health metrics."""
+        charge_state = response.setdefault("charge_state", {})
+        
+        # Calculate brick voltage imbalance from max/min
+        brick_max = charge_state.get("brick_voltage_max")
+        brick_min = charge_state.get("brick_voltage_min")
+        if isinstance(brick_max, (int, float)) and isinstance(brick_min, (int, float)):
+            charge_state["brick_voltage_imbalance"] = brick_max - brick_min
+
+        # Calculate battery balance score (0-100%) - SOC-aware
+        # Based on imbalance thresholds that vary by SOC:
+        # SOC >= 90%: <=10mV=Excellent(100%), <=20mV=Good(85%), <=30mV=Watch(70%), >30mV=Warning(55%)
+        # SOC >= 50%: <=20mV=Excellent(100%), <=30mV=Good(85%), <=50mV=Watch(70%), >50mV=Warning(55%)
+        # SOC < 50%:  <=40mV=Excellent(100%), <=80mV=Good(85%), <=120mV=Watch(70%), >120mV=Warning(55%)
+        imbalance = charge_state.get("brick_voltage_imbalance")
+        soc = charge_state.get("battery_level") or charge_state.get("usable_battery_level")
+        if isinstance(imbalance, (int, float)) and isinstance(soc, (int, float)):
+            if soc >= 90:
+                # Near full charge - tightest thresholds
+                if imbalance <= 10:
+                    score = 100
+                elif imbalance <= 20:
+                    score = 85
+                elif imbalance <= 30:
+                    score = 70
+                else:
+                    score = 55
+            elif soc >= 50:
+                # Mid-range SOC
+                if imbalance <= 20:
+                    score = 100
+                elif imbalance <= 30:
+                    score = 85
+                elif imbalance <= 50:
+                    score = 70
+                else:
+                    score = 55
+            else:
+                # Low SOC - wider thresholds
+                if imbalance <= 40:
+                    score = 100
+                elif imbalance <= 80:
+                    score = 85
+                elif imbalance <= 120:
+                    score = 70
+                else:
+                    score = 55
+            charge_state["battery_balance_score"] = score
+
+    def _apply_door_state(
+        self,
+        response: dict[str, Any],
+        signals: dict[str, Any],
+        processed_fields: set[str],
+    ) -> None:
+        """Expand the composite DoorState signal into Fleet API door fields."""
+        # Handle telemetry format: signals = {"DoorState": {"DriverFront": 1, ...}}
+        doors = signals.get("DoorState")
+        if isinstance(doors, dict):
+            door_mapping = {
+                "DriverFront": "df",
+                "DriverRear": "dr",
+                "PassengerFront": "pf",
+                "PassengerRear": "pr",
+                "TrunkFront": "ft",
+                "TrunkRear": "rt",
+            }
+            vehicle_state = response.setdefault("vehicle_state", {})
+            for telemetry_key, state_key in door_mapping.items():
+                if telemetry_key in doors:
+                    # Convert 0/1 to "Closed"/"Open" for ENUM sensors
+                    vehicle_state[state_key] = "Open" if self._is_truthy(doors[telemetry_key]) else "Closed"
+            processed_fields.add("DoorState")
+            return
+        
+        # Handle Fleet API format: response already has individual door states (df, dr, pf, pr, ft, rt)
+        # Just ensure they're converted to "Open"/"Closed" strings for ENUM sensors
+        vehicle_state = response.get("vehicle_state", {})
+        door_keys = ["df", "dr", "pf", "pr", "ft", "rt"]
+        for key in door_keys:
+            if key in vehicle_state:
+                vehicle_state[key] = "Open" if self._is_truthy(vehicle_state[key]) else "Closed"
+
+    @staticmethod
+    def _is_truthy(value: Any) -> bool:
+        """Normalize telemetry booleans and state enums."""
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        text = str(value)
+        marker = text.rfind("State")
+        tail = text[marker + len("State"):] if marker >= 0 else text
+        return tail.strip().lower() in {
+            "true",
+            "1",
+            "on",
+            "open",
+            "enabled",
+            "armed",
+        }
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Return cached telemetry state without polling Tesla vehicle data."""

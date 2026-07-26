@@ -38,6 +38,7 @@ class TelemetryConsumer:
         self._task: asyncio.Task | None = None
         self._running = False
         self._last_signals_by_vin: dict[str, dict[str, Any]] = {}
+        self._last_valid_pack_voltage: float | None = None
 
     async def async_start(self) -> None:
         """Start consuming telemetry data."""
@@ -194,7 +195,6 @@ class TelemetryConsumer:
         response.setdefault("climate_state", {})
         response.setdefault("vehicle_state", {})
         response.setdefault("drive_state", {})
-        response.setdefault("media_info", {})
         response.setdefault("powertrain", {})
         response.setdefault("vehicle_config", {})
 
@@ -205,56 +205,54 @@ class TelemetryConsumer:
                 ("charge_state", "usable_battery_level", self._to_int),
                 ("charge_state", "battery_level", self._to_int),
             ),
-            "BatteryLevel": (("charge_state", "battery_level", self._to_int),),
-            "RatedRange": (("charge_state", "battery_range", None),),
-            "EstBatteryRange": (("charge_state", "est_battery_range", None),),
-            "IdealBatteryRange": (("charge_state", "ideal_battery_range", None),),
+            "RatedRange": (("charge_state", "battery_range", self._to_float),),
+            "EstBatteryRange": (("charge_state", "est_battery_range", self._to_float),),
+            "IdealBatteryRange": (("charge_state", "ideal_battery_range", self._to_float),),
             "DetailedChargeState": (("charge_state", "charging_state", self._charge_state),),
             "ChargeLimitSoc": (("charge_state", "charge_limit_soc", self._to_int),),
-            "TimeToFullCharge": (("charge_state", "time_to_full_charge", None),),
+            "TimeToFullCharge": (("charge_state", "time_to_full_charge", self._to_float),),
             "ChargerVoltage": (("charge_state", "charger_voltage", self._to_int),),
             "ChargeAmps": (
                 ("charge_state", "charger_actual_current", self._to_int),
             ),
             "ChargePortDoorOpen": (("charge_state", "charge_port_door_open", self._is_truthy),),
-            "ACChargingPower": (("charge_state", "charger_power", None),),
-            "DCChargingPower": (("charge_state", "charger_power", None),),
-            "ACChargingEnergyIn": (("charge_state", "charge_energy_added", None),),
-            "DCChargingEnergyIn": (("charge_state", "charge_energy_added", None),),
+            "ACChargingPower": (("charge_state", "charger_power", self._to_float),),
+            "DCChargingPower": (("charge_state", "charger_power", self._to_float),),
+            "ACChargingEnergyIn": (("charge_state", "charge_energy_added", self._to_float),),
+            "DCChargingEnergyIn": (("charge_state", "charge_energy_added", self._to_float),),
             "ChargeCurrentRequest": (("charge_state", "charge_current_request", self._to_int),),
             "ChargeCurrentRequestMax": (("charge_state", "charge_current_request_max", self._to_int),),
             "ChargeEnableRequest": (("charge_state", "charge_enable_request", self._is_truthy),),
             "ChargePortLatch": (("charge_state", "charge_port_latch", None),),
-            "ChargeRateMilePerHour": (("charge_state", "charge_rate", None),),
+            "ChargeRateMilePerHour": (("charge_state", "charge_rate", self._to_float),),
             "ChargerPhases": (("charge_state", "charger_phases", self._to_int),),
-            "ChargingCableType": (("charge_state", "conn_charge_cable", None),),
+            "ChargingCableType": (("charge_state", "conn_charge_cable", self._charging_cable_type),),
             "FastChargerPresent": (("charge_state", "fast_charger_present", self._is_truthy),),
-            "FastChargerType": (("charge_state", "fast_charger_type", None),),
+            "FastChargerType": (("charge_state", "fast_charger_type", self._fast_charger_type),),
             "NotEnoughPowerToHeat": (("charge_state", "not_enough_power_to_heat", self._is_truthy),),
-            "ScheduledChargingMode": (("charge_state", "scheduled_charging_mode", None),),
+            "ScheduledChargingMode": (("charge_state", "scheduled_charging_mode", self._scheduled_charging_mode),),
             "ScheduledChargingPending": (("charge_state", "scheduled_charging_pending", self._is_truthy),),
             "ScheduledChargingStartTime": (("charge_state", "scheduled_charging_start_time", None),),
             "SuperchargerSessionTripPlanner": (("charge_state", "supercharger_session_trip_planner", self._is_truthy),),
             "ChargeState": (("charge_state", "charging_state", self._charge_state),),
             "BMSState": (("charge_state", "bms_state", None),),
             "BatteryHeaterOn": (("climate_state", "battery_heater_on", self._is_truthy),),
-            "EnergyRemaining": (("charge_state", "energy_remaining", None),),
-            "EstimatedHoursToChargeTermination": (("charge_state", "estimated_hours_to_charge_termination", None),),
-            "LifetimeEnergyUsed": (("charge_state", "lifetime_energy_used", None),),
-            "LifetimeEnergyUsedDrive": (("charge_state", "lifetime_energy_used_drive", None),),
-            "PackCurrent": (("charge_state", "pack_current", None),),
-            "PackVoltage": (("charge_state", "pack_voltage", None),),
-            "ModuleTempMax": (("charge_state", "module_temp_max", None),),
-            "ModuleTempMin": (("charge_state", "module_temp_min", None),),
-            "BrickVoltageMax": (("charge_state", "brick_voltage_max", None),),
-            "BrickVoltageMin": (("charge_state", "brick_voltage_min", None),),
+            "EnergyRemaining": (("charge_state", "energy_remaining", self._to_float),),
+            "EstimatedHoursToChargeTermination": (("charge_state", "estimated_hours_to_charge_termination", self._to_float),),
+            "LifetimeEnergyUsed": (("charge_state", "lifetime_energy_used", self._to_float),),
+            "PackCurrent": (("charge_state", "pack_current", self._to_float),),
+            "PackVoltage": (("charge_state", "pack_voltage", self._pack_voltage),),
+            "ModuleTempMax": (("charge_state", "module_temp_max", self._to_float),),
+            "ModuleTempMin": (("charge_state", "module_temp_min", self._to_float),),
+            "BrickVoltageMax": (("charge_state", "brick_voltage_max", self._to_millivolts),),
+            "BrickVoltageMin": (("charge_state", "brick_voltage_min", self._to_millivolts),),
             "NumBrickVoltageMax": (("charge_state", "num_brick_voltage_max", self._to_int),),
             "NumBrickVoltageMin": (("charge_state", "num_brick_voltage_min", self._to_int),),
             "NumModuleTempMax": (("charge_state", "num_module_temp_max", self._to_int),),
             "NumModuleTempMin": (("charge_state", "num_module_temp_min", self._to_int),),
             "DCDCEnable": (("charge_state", "dcdc_enable", self._is_truthy),),
             "PowershareHoursLeft": (("charge_state", "powershare_hours_left", self._to_int),),
-            "PowershareInstantaneousPowerKW": (("charge_state", "powershare_instantaneous_power_kw", None),),
+            "PowershareInstantaneousPowerKW": (("charge_state", "powershare_instantaneous_power_kw", self._to_float),),
             "PowershareStatus": (("charge_state", "powershare_status", None),),
             "PowershareStopReason": (("charge_state", "powershare_stop_reason", None),),
             "PowershareType": (("charge_state", "powershare_type", None),),
@@ -271,7 +269,7 @@ class TelemetryConsumer:
             "HvacFanStatus": (("climate_state", "fan_status", None),),
             "HvacPower": (("climate_state", "is_climate_on", self._is_truthy),),
             "ClimateKeeperMode": (("climate_state", "climate_keeper_mode", self._climate_keeper_mode),),
-            "DefrostMode": (("climate_state", "defrost_mode", self._is_defrost_active),),
+            "DefrostMode": (("climate_state", "defrost_mode", self._defrost_mode),),
             "SeatHeaterLeft": (("climate_state", "seat_heater_left", self._to_int),),
             "SeatHeaterRight": (("climate_state", "seat_heater_right", self._to_int),),
             "SeatHeaterRearLeft": (("climate_state", "seat_heater_rear_left", self._to_int),),
@@ -298,8 +296,8 @@ class TelemetryConsumer:
             "WiperHeatEnabled": (("climate_state", "wiper_blade_heater", self._is_truthy),),
             "AutoSeatClimateLeft": (("climate_state", "auto_seat_climate_left", self._is_truthy),),
             "AutoSeatClimateRight": (("climate_state", "auto_seat_climate_right", self._is_truthy),),
-            "CabinOverheatProtectionMode": (("climate_state", "cabin_overheat_protection", None),),
-            "CabinOverheatProtectionTemperatureLimit": (("climate_state", "cop_activation_temperature", None),),
+            "CabinOverheatProtectionMode": (("climate_state", "cabin_overheat_protection", self._cabin_overheat_protection),),
+            "CabinOverheatProtectionTemperatureLimit": (("climate_state", "cop_activation_temperature", self._cop_activation_temp),),
             "DefrostForPreconditioning": (("climate_state", "defrost_for_preconditioning", self._is_truthy),),
             
             # Vehicle State
@@ -386,28 +384,15 @@ class TelemetryConsumer:
             "LocatedAtHome": (("drive_state", "located_at_home", self._is_truthy),),
             "LocatedAtWork": (("drive_state", "located_at_work", self._is_truthy),),
             
-            # Media
-            "MediaPlaybackStatus": (("media_info", "media_playback_status", None),),
-            "MediaPlaybackSource": (("media_info", "now_playing_source", None),),
-            "MediaNowPlayingTitle": (("media_info", "now_playing_title", None),),
-            "MediaNowPlayingArtist": (("media_info", "now_playing_artist", None),),
-            "MediaNowPlayingAlbum": (("media_info", "now_playing_album", None),),
-            "MediaNowPlayingStation": (("media_info", "now_playing_station", None),),
-            "MediaNowPlayingDuration": (("media_info", "now_playing_duration", self._to_int),),
-            "MediaNowPlayingElapsed": (("media_info", "now_playing_elapsed", self._to_int),),
-            "MediaAudioVolume": (("media_info", "audio_volume", self._to_int),),
-            "MediaAudioVolumeIncrement": (("media_info", "audio_volume_increment", None),),
-            "MediaAudioVolumeMax": (("media_info", "audio_volume_max", self._to_int),),
-            
             # Powertrain
             "DiStateF": (("powertrain", "di_state_f", None),),
             "DiStateR": (("powertrain", "di_state_r", None),),
             "DiStateREL": (("powertrain", "di_state_rel", None),),
             "DiStateRER": (("powertrain", "di_state_rer", None),),
-            "DiAxleSpeedF": (("powertrain", "di_axle_speed_f", None),),
-            "DiAxleSpeedR": (("powertrain", "di_axle_speed_r", None),),
-            "DiAxleSpeedREL": (("powertrain", "di_axle_speed_rel", None),),
-            "DiAxleSpeedRER": (("powertrain", "di_axle_speed_rer", None),),
+            "DiAxleSpeedF": (("powertrain", "di_axle_speed_f", self._axle_speed_to_kmh),),
+            "DiAxleSpeedR": (("powertrain", "di_axle_speed_r", self._axle_speed_to_kmh),),
+            "DiAxleSpeedREL": (("powertrain", "di_axle_speed_rel", self._axle_speed_to_kmh),),
+            "DiAxleSpeedRER": (("powertrain", "di_axle_speed_rer", self._axle_speed_to_kmh),),
             "DiMotorCurrentF": (("powertrain", "di_motor_current_f", None),),
             "DiMotorCurrentR": (("powertrain", "di_motor_current_r", None),),
             "DiMotorCurrentREL": (("powertrain", "di_motor_current_rel", None),),
@@ -443,17 +428,6 @@ class TelemetryConsumer:
             "TpmsLastSeenPressureTimeFr": (("vehicle_state", "tpms_last_seen_pressure_time_fr", None),),
             "TpmsLastSeenPressureTimeRl": (("vehicle_state", "tpms_last_seen_pressure_time_rl", None),),
             "TpmsLastSeenPressureTimeRr": (("vehicle_state", "tpms_last_seen_pressure_time_rr", None),),
-            "SemitruckTpmsPressureRe1L0": (("vehicle_state", "semitruck_tpms_pressure_re1_l0", None),),
-            "SemitruckTpmsPressureRe1L1": (("vehicle_state", "semitruck_tpms_pressure_re1_l1", None),),
-            "SemitruckTpmsPressureRe1R0": (("vehicle_state", "semitruck_tpms_pressure_re1_r0", None),),
-            "SemitruckTpmsPressureRe1R1": (("vehicle_state", "semitruck_tpms_pressure_re1_r1", None),),
-            "SemitruckTpmsPressureRe2L0": (("vehicle_state", "semitruck_tpms_pressure_re2_l0", None),),
-            "SemitruckTpmsPressureRe2L1": (("vehicle_state", "semitruck_tpms_pressure_re2_l1", None),),
-            "SemitruckTpmsPressureRe2R0": (("vehicle_state", "semitruck_tpms_pressure_re2_r0", None),),
-            "SemitruckTpmsPressureRe2R1": (("vehicle_state", "semitruck_tpms_pressure_re2_r1", None),),
-            "SemitruckTractorParkBrakeStatus": (("vehicle_state", "semitruck_tractor_park_brake_status", None),),
-            "SemitruckTrailerParkBrakeStatus": (("vehicle_state", "semitruck_trailer_park_brake_status", None),),
-            "SemitruckPassengerSeatFoldPosition": (("vehicle_state", "semitruck_passenger_seat_fold_position", None),),
             
             # User Preferences
             "Setting24HourTime": (("gui_settings", "gui_24_hour_time", self._is_truthy),),
@@ -579,6 +553,52 @@ class TelemetryConsumer:
             {"ACChargingEnergyIn", "DCChargingEnergyIn"} & received_fields
         )
 
+        # Calculate brick voltage imbalance from max/min
+        brick_max = charge_state.get("brick_voltage_max")
+        brick_min = charge_state.get("brick_voltage_min")
+        if isinstance(brick_max, (int, float)) and isinstance(brick_min, (int, float)):
+            charge_state["brick_voltage_imbalance"] = brick_max - brick_min
+
+        # Calculate battery balance score (0-100%) - SOC-aware
+        # Based on imbalance thresholds that vary by SOC:
+        # SOC >= 90%: <=10mV=Excellent(100%), <=20mV=Good(85%), <=30mV=Watch(70%), >30mV=Warning(55%)
+        # SOC >= 50%: <=20mV=Excellent(100%), <=30mV=Good(85%), <=50mV=Watch(70%), >50mV=Warning(55%)
+        # SOC < 50%:  <=40mV=Excellent(100%), <=80mV=Good(85%), <=120mV=Watch(70%), >120mV=Warning(55%)
+        imbalance = charge_state.get("brick_voltage_imbalance")
+        soc = charge_state.get("battery_level") or charge_state.get("usable_battery_level")
+        if isinstance(imbalance, (int, float)) and isinstance(soc, (int, float)):
+            if soc >= 90:
+                # Near full charge - tightest thresholds
+                if imbalance <= 10:
+                    score = 100
+                elif imbalance <= 20:
+                    score = 85
+                elif imbalance <= 30:
+                    score = 70
+                else:
+                    score = 55
+            elif soc >= 50:
+                # Mid-range SOC
+                if imbalance <= 20:
+                    score = 100
+                elif imbalance <= 30:
+                    score = 85
+                elif imbalance <= 50:
+                    score = 70
+                else:
+                    score = 55
+            else:
+                # Low SOC - wider thresholds
+                if imbalance <= 40:
+                    score = 100
+                elif imbalance <= 80:
+                    score = 85
+                elif imbalance <= 120:
+                    score = 70
+                else:
+                    score = 55
+            charge_state["battery_balance_score"] = score
+
     @classmethod
     def _apply_door_state(
         cls,
@@ -614,6 +634,46 @@ class TelemetryConsumer:
             return None
 
     @staticmethod
+    def _to_float(value: Any) -> float | None:
+        """Convert telemetry numeric values to float fields."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _axle_speed_to_kmh(value: Any) -> float | None:
+        """Convert axle speed from RPM to km/h.
+        
+        Telemetry provides axle speed in RPM. Convert to km/h using typical
+        tire circumference. Formula: km/h = RPM * circumference_m * 60 / 1000
+        Using ~2.1m tire circumference for typical Tesla tires.
+        """
+        try:
+            rpm = float(value)
+            # Typical Tesla tire circumference ~2.1m
+            return round(rpm * 2.1 * 60 / 1000, 1)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _to_float(value: Any) -> float | None:
+        """Convert telemetry numeric values to float fields."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _to_millivolts(value: Any) -> float | None:
+        """Convert telemetry voltage values from volts to millivolts."""
+        try:
+            volts = float(value)
+            return volts * 1000
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _enum_tail(value: Any) -> str:
         """Strip the protobuf enum field prefix from a telemetry value."""
         text = str(value)
@@ -631,10 +691,97 @@ class TelemetryConsumer:
         """Normalize a detailed charging-state enum."""
         return cls._enum_tail(value).strip() or "Disconnected"
 
-    @classmethod
-    def _climate_keeper_mode(cls, value: Any) -> str:
+    def _climate_keeper_mode(self, value: Any) -> str:
         """Normalize a climate-keeper enum."""
-        return (cls._enum_tail(value).strip() or "off").lower()
+        text = str(value)
+        # Handle "ClimateKeeperModeStateOff" -> "off", "ClimateKeeperModeStateDog" -> "dog", etc.
+        if text.startswith("ClimateKeeperMode"):
+            text = text[len("ClimateKeeperMode"):]
+        # Also handle "State" suffix if present
+        marker = text.rfind("State")
+        if marker >= 0:
+            text = text[marker + len("State"):]
+        return text.strip().lower() or "off"
+
+    def _scheduled_charging_mode(self, value: Any) -> str:
+        """Normalize a scheduled charging mode enum."""
+        text = str(value)
+        # Handle "ScheduledChargingModeOff" -> "off", "ScheduledChargingModeStartAt" -> "start_at", etc.
+        if text.startswith("ScheduledChargingMode"):
+            text = text[len("ScheduledChargingMode"):]
+        # Also handle "State" suffix if present
+        marker = text.rfind("State")
+        if marker >= 0:
+            text = text[marker + len("State"):]
+        return text.strip().lower() or "off"
+
+    def _defrost_mode(self, value: Any) -> str:
+        """Normalize a defrost-mode enum."""
+        text = str(value)
+        # Handle "DefrostModeStateOff" -> "Off", "DefrostModeStateNormal" -> "Normal", etc.
+        if text.startswith("DefrostMode"):
+            text = text[len("DefrostMode"):]
+        # Also handle "State" suffix if present
+        marker = text.rfind("State")
+        if marker >= 0:
+            text = text[marker + len("State"):]
+        return text.strip() or "Unknown"
+
+    def _cabin_overheat_protection(self, value: Any) -> str:
+        """Normalize a cabin overheat protection mode enum."""
+        text = str(value)
+        # Handle "CabinOverheatProtectionModeStateOff" -> "Off", "CabinOverheatProtectionModeStateOn" -> "On", etc.
+        if text.startswith("CabinOverheatProtectionMode"):
+            text = text[len("CabinOverheatProtectionMode"):]
+        # Also handle "State" suffix if present
+        marker = text.rfind("State")
+        if marker >= 0:
+            text = text[marker + len("State"):]
+        return text.strip() or "Off"
+
+    def _cop_activation_temp(self, value: Any) -> str:
+        """Normalize a COP activation temperature enum."""
+        text = str(value)
+        # Handle "ClimateOverheatProtectionTempLimitLow" -> "Low", etc.
+        if text.startswith("ClimateOverheatProtectionTempLimit"):
+            text = text[len("ClimateOverheatProtectionTempLimit"):]
+        return text.strip() or "Low"
+
+    def _charging_cable_type(self, value: Any) -> str:
+        """Normalize a charging cable type enum."""
+        text = str(value)
+        # Handle "ChargingCableTypeIEC" -> "IEC", "ChargingCableTypeSAE" -> "SAE", etc.
+        if text.startswith("ChargingCableType"):
+            text = text[len("ChargingCableType"):]
+        return text.strip() or "Unknown"
+
+    def _fast_charger_type(self, value: Any) -> str:
+        """Normalize a fast charger type enum."""
+        text = str(value)
+        # Handle "FastChargerTypeSupercharger" -> "Supercharger", etc.
+        if text.startswith("FastChargerType"):
+            text = text[len("FastChargerType"):]
+        return text.strip() or "Unknown"
+
+    def _pack_voltage(self, value: Any) -> float | None:
+        """Filter out transient low-voltage readings during vehicle wake-up.
+
+        During wake-up, Fleet Telemetry emits transient PackVoltage values
+        (4–13 V) while BMSState is Standby. After BMS transitions to active,
+        PackVoltage updates to the expected HV battery voltage (~390 V).
+        This method ignores values <= 200 V and returns the last valid reading.
+        """
+        try:
+            voltage = float(value)
+        except (TypeError, ValueError):
+            return None
+
+        if voltage > 200:
+            self._last_valid_pack_voltage = voltage
+            return voltage
+
+        # Return last valid voltage if available, otherwise None to ignore transient
+        return self._last_valid_pack_voltage
 
     @classmethod
     def _window_position(cls, value: Any) -> int:
@@ -646,11 +793,6 @@ class TelemetryConsumer:
         """Normalize sentry telemetry states to an enabled boolean."""
         if isinstance(value, bool):
             return value
-        return cls._enum_tail(value).strip().lower() not in {"", "off", "unknown"}
-
-    @classmethod
-    def _is_defrost_active(cls, value: Any) -> bool:
-        """Normalize a defrost-mode enum to an enabled boolean."""
         return cls._enum_tail(value).strip().lower() not in {"", "off", "unknown"}
 
     @classmethod

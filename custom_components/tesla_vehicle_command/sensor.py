@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,11 +27,14 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import TeslaVehicleCommandCoordinator
 from .entity import TeslaVehicleCommandEntity
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -356,15 +360,6 @@ SENSOR_DESCRIPTIONS = [
         icon="mdi:battery",
     ),
     TeslaSensorEntityDescription(
-        key="lifetime_energy_used_drive",
-        name="Lifetime Energy Used Drive",
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        value_path="charge_state.lifetime_energy_used_drive",
-        icon="mdi:battery",
-    ),
-    TeslaSensorEntityDescription(
         key="pack_current",
         name="Pack Current",
         device_class=SensorDeviceClass.CURRENT,
@@ -405,7 +400,7 @@ SENSOR_DESCRIPTIONS = [
         name="Brick Voltage Max",
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
         value_path="charge_state.brick_voltage_max",
         icon="mdi:flash",
     ),
@@ -414,9 +409,29 @@ SENSOR_DESCRIPTIONS = [
         name="Brick Voltage Min",
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
         value_path="charge_state.brick_voltage_min",
         icon="mdi:flash",
+    ),
+    TeslaSensorEntityDescription(
+        key="brick_voltage_imbalance",
+        name="Brick Voltage Imbalance",
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
+        value_path="charge_state.brick_voltage_imbalance",
+        icon="mdi:flash-alert",
+        default_value=0,
+    ),
+    TeslaSensorEntityDescription(
+        key="battery_balance_score",
+        name="Battery Balance Score",
+        device_class=SensorDeviceClass.BATTERY,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=PERCENTAGE,
+        value_path="charge_state.battery_balance_score",
+        icon="mdi:battery-heart-variant",
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     TeslaSensorEntityDescription(
         key="num_brick_voltage_max",
@@ -928,80 +943,6 @@ SENSOR_DESCRIPTIONS = [
         icon="mdi:car-tire-alert",
     ),
 
-    # Media
-    TeslaSensorEntityDescription(
-        key="media_playback_status",
-        name="Media Playback Status",
-        value_path="media_info.media_playback_status",
-        icon="mdi:music",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_playback_source",
-        name="Media Playback Source",
-        value_path="media_info.now_playing_source",
-        icon="mdi:music-box",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_now_playing_title",
-        name="Now Playing Title",
-        value_path="media_info.now_playing_title",
-        icon="mdi:music-note",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_now_playing_artist",
-        name="Now Playing Artist",
-        value_path="media_info.now_playing_artist",
-        icon="mdi:artist",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_now_playing_album",
-        name="Now Playing Album",
-        value_path="media_info.now_playing_album",
-        icon="mdi:album",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_now_playing_station",
-        name="Now Playing Station",
-        value_path="media_info.now_playing_station",
-        icon="mdi:radio",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_now_playing_duration",
-        name="Now Playing Duration",
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
-        value_path="media_info.now_playing_duration",
-        icon="mdi:timer",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_now_playing_elapsed",
-        name="Now Playing Elapsed",
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
-        value_path="media_info.now_playing_elapsed",
-        icon="mdi:timer",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_audio_volume",
-        name="Media Volume",
-        value_path="media_info.audio_volume",
-        icon="mdi:volume-high",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_audio_volume_increment",
-        name="Media Volume Increment",
-        value_path="media_info.audio_volume_increment",
-        icon="mdi:volume-high",
-    ),
-    TeslaSensorEntityDescription(
-        key="media_audio_volume_max",
-        name="Media Volume Max",
-        value_path="media_info.audio_volume_max",
-        icon="mdi:volume-high",
-    ),
-
     # Powertrain (Diagnostic)
     TeslaSensorEntityDescription(
         key="di_state_f",
@@ -1425,6 +1366,21 @@ async def async_setup_entry(
     """Set up sensor entities."""
     coordinator: TeslaVehicleCommandCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
 
+    # Clean up orphaned entities from previous versions
+    entity_registry = er.async_get(hass)
+    current_keys = {desc.key for desc in SENSOR_DESCRIPTIONS}
+    current_keys.add("telemetry_status")  # TeslaTelemetryStatusSensor
+
+    for vehicle in coordinator.vehicles:
+        vin = vehicle["vin"]
+        # Remove entities that are no longer defined
+        for entity_entry in er.async_entries_for_config_entry(entity_registry, entry.entry_id):
+            if entity_entry.unique_id.startswith(f"{vin}_"):
+                sensor_key = entity_entry.unique_id[len(vin) + 1:]
+                if sensor_key not in current_keys:
+                    _LOGGER.info("Removing orphaned sensor entity: %s", entity_entry.entity_id)
+                    entity_registry.async_remove(entity_entry.entity_id)
+
     entities = []
     for vehicle in coordinator.vehicles:
         vin = vehicle["vin"]
@@ -1555,6 +1511,11 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
                 level = int(value)
                 if 0 <= level < len(options):
                     return options[level]
+            # Handle defrost_mode numeric values (0=Unknown, 1=Off, 2=Normal, 3=Max, 4=AutoDefog)
+            if isinstance(value, (int, float)) and options == ["Unknown", "Off", "Normal", "Max", "AutoDefog"]:
+                level = int(value)
+                if 0 <= level < len(options):
+                    return options[level]
             shift_states = {"D": "Driving", "N": "Neutral", "R": "Reverse", "P": "Parking"}
             mapped = shift_states.get(str(value))
             if mapped:
@@ -1562,6 +1523,67 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
             text = str(value)
             if text in options:
                 return text
+            # Handle raw Fleet API enum values (e.g., "ScheduledChargingModeOff", "ClimateKeeperModeStateOff", "DefrostModeStateOff")
+            # ScheduledChargingMode: "ScheduledChargingModeOff" -> "off", "ScheduledChargingModeStartAt" -> "start_at"
+            if text.startswith("ScheduledChargingMode"):
+                text = text[len("ScheduledChargingMode"):]
+                marker = text.rfind("State")
+                if marker >= 0:
+                    text = text[marker + len("State"):]
+                text = text.strip().lower()
+                if text in options:
+                    return text
+            # Handle capitalized "Off" from Fleet API
+            if text == "Off" and "off" in options:
+                return "off"
+            # Handle invalid/unknown values
+            if text.lower() in ("<invalid>", "invalid", "unknown", "none"):
+                return None
+            # ClimateKeeperMode: "ClimateKeeperModeStateOff" -> "off", "ClimateKeeperModeStateDog" -> "dog"
+            if text.startswith("ClimateKeeperMode"):
+                text = text[len("ClimateKeeperMode"):]
+                marker = text.rfind("State")
+                if marker >= 0:
+                    text = text[marker + len("State"):]
+                text = text.strip().lower()
+                if text in options:
+                    return text
+            # DefrostMode: "DefrostModeStateOff" -> "Off", "DefrostModeStateNormal" -> "Normal"
+            if text.startswith("DefrostMode"):
+                text = text[len("DefrostMode"):]
+                marker = text.rfind("State")
+                if marker >= 0:
+                    text = text[marker + len("State"):]
+                text = text.strip()
+                if text in options:
+                    return text
+            # CabinOverheatProtectionMode: "CabinOverheatProtectionModeStateOff" -> "Off", "CabinOverheatProtectionModeStateOn" -> "On", "CabinOverheatProtectionModeStateFanOnly" -> "Fan Only"
+            if text.startswith("CabinOverheatProtectionMode"):
+                text = text[len("CabinOverheatProtectionMode"):]
+                marker = text.rfind("State")
+                if marker >= 0:
+                    text = text[marker + len("State"):]
+                text = text.strip()
+                if text in options:
+                    return text
+            # ClimateOverheatProtectionTempLimit: "ClimateOverheatProtectionTempLimitLow" -> "Low", etc.
+            if text.startswith("ClimateOverheatProtectionTempLimit"):
+                text = text[len("ClimateOverheatProtectionTempLimit"):]
+                text = text.strip()
+                if text in options:
+                    return text
+            # ChargingCableType: "ChargingCableTypeIEC" -> "IEC", "ChargingCableTypeSAE" -> "SAE", etc.
+            if text.startswith("ChargingCableType"):
+                text = text[len("ChargingCableType"):]
+                text = text.strip()
+                if text in options:
+                    return text
+            # FastChargerType: "FastChargerTypeSupercharger" -> "Supercharger", etc.
+            if text.startswith("FastChargerType"):
+                text = text[len("FastChargerType"):]
+                text = text.strip()
+                if text in options:
+                    return text
             capitalized = text.capitalize()
             if capitalized in options:
                 return capitalized

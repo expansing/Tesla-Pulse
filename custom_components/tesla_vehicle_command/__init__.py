@@ -84,7 +84,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         
         initial_data = await coordinator.async_fetch_initial_vehicle_data(vin)
         if initial_data and "response" in initial_data:
-            coordinator.set_telemetry_data(vin, initial_data["response"])
+            # Process the response to compute derived fields
+            processed_response = coordinator._process_vehicle_response(initial_data["response"])
+            coordinator.set_telemetry_data(vin, processed_response)
             _LOGGER.info("Fetched initial vehicle data for %s", vin)
 
     # Initialize telemetry consumer (auto-discovers endpoint via Supervisor API)
