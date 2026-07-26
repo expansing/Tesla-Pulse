@@ -416,6 +416,8 @@ The integration provides battery health diagnostics derived from Fleet Telemetry
 | **Brick Voltage Imbalance** | mV | Difference between max and min brick voltage (ΔV) |
 | **Battery Balance Score** | % | SOC-aware health score (0–100%) |
 
+> **Note:** These sensors require **Fleet Telemetry** to be configured and running. The `BrickVoltageMax` and `BrickVoltageMin` fields are only available via telemetry signals, not from the Fleet API `vehicle_data` endpoint. They will show as unavailable until telemetry data is received.
+
 ### Battery Balance Score
 
 The **Battery Balance Score** adjusts its thresholds based on State of Charge (SOC), since cell imbalance naturally varies across the discharge curve:
