@@ -1528,6 +1528,9 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
                 text = text.strip().lower()
                 if text in options:
                     return text
+            # Handle capitalized "Off" from Fleet API
+            if text == "Off" and "off" in options:
+                return "off"
             # Handle invalid/unknown values
             if text.lower() in ("<invalid>", "invalid", "unknown", "none"):
                 return None
