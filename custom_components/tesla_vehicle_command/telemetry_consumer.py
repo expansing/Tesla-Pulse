@@ -244,8 +244,8 @@ class TelemetryConsumer:
             "PackVoltage": (("charge_state", "pack_voltage", self._pack_voltage),),
             "ModuleTempMax": (("charge_state", "module_temp_max", self._to_float),),
             "ModuleTempMin": (("charge_state", "module_temp_min", self._to_float),),
-            "BrickVoltageMax": (("charge_state", "brick_voltage_max", self._to_float),),
-            "BrickVoltageMin": (("charge_state", "brick_voltage_min", self._to_float),),
+            "BrickVoltageMax": (("charge_state", "brick_voltage_max", self._to_millivolts),),
+            "BrickVoltageMin": (("charge_state", "brick_voltage_min", self._to_millivolts),),
             "NumBrickVoltageMax": (("charge_state", "num_brick_voltage_max", self._to_int),),
             "NumBrickVoltageMin": (("charge_state", "num_brick_voltage_min", self._to_int),),
             "NumModuleTempMax": (("charge_state", "num_module_temp_max", self._to_int),),
@@ -638,6 +638,15 @@ class TelemetryConsumer:
         """Convert telemetry numeric values to float fields."""
         try:
             return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _to_millivolts(value: Any) -> float | None:
+        """Convert telemetry voltage values from volts to millivolts."""
+        try:
+            volts = float(value)
+            return volts * 1000
         except (TypeError, ValueError):
             return None
 
