@@ -444,12 +444,33 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if raw_signals is not None:
             self._telemetry_raw_signals[vin] = dict(raw_signals)
 
+        # Process the response to compute derived fields (imbalance, balance score, door states)
+        processed_response = self._process_vehicle_response(response)
+
         updated_data = dict(self.data or self._empty_telemetry_data())
-        updated_data[vin] = {"response": response}
+        updated_data[vin] = {"response": processed_response}
         self.async_set_updated_data(updated_data)
         self._telemetry_store.async_delay_save(
             self._telemetry_store_payload, 30
         )
+
+    def _process_vehicle_response(self, response: dict[str, Any]) -> dict[str, Any]:
+        """Process vehicle response to compute derived fields."""
+        # Create a copy to avoid modifying the original
+        processed = dict(response)
+        
+        # Apply charging composites (imbalance, balance score)
+        self._apply_charging_composites(
+            processed,
+            {},  # last_signals not available for Fleet API response
+            set(),  # received_fields
+            set(),  # processed_fields
+        )
+        
+        # Apply door state expansion
+        self._apply_door_state(processed, {}, set())
+        
+        return processed
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Return cached telemetry state without polling Tesla vehicle data."""
