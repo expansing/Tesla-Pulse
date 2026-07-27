@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Tesla Vehicle Command Setup",
+        "title": "Tesla Pulse Setup",
         "description": "Enter your Tesla Developer App credentials. You can create an app at https://developer.tesla.com",
         "data": {
           "client_id": "Client ID",
@@ -45,7 +45,7 @@
   "options": {
     "step": {
       "init": {
-        "title": "Tesla Vehicle Command options",
+        "title": "Tesla Pulse options",
         "data": {
           "update_interval": "Vehicle update interval",
           "telemetry_hostname": "Fleet Telemetry hostname",

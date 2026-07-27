@@ -1,10 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title">
-  <title>Tesla Vehicle Command</title>
-  <rect width="512" height="512" rx="88" fill="#102a43"/>
-  <path d="M104 316l30-104c9-31 31-49 63-49h118c32 0 54 18 63 49l30 104v55c0 16-13 29-29 29h-18c-16 0-29-13-29-29v-14H180v14c0 16-13 29-29 29h-18c-16 0-29-13-29-29v-55z" fill="#e7f7f8"/>
-  <path d="M147 278h218l-18-58c-5-17-15-25-31-25H196c-16 0-26 8-31 25l-18 58z" fill="#4db6ac"/>
-  <circle cx="177" cy="320" r="17" fill="#102a43"/>
-  <circle cx="335" cy="320" r="17" fill="#102a43"/>
-  <path d="M274 82l-68 123h51l-18 91 68-126h-51z" fill="#f5b942"/>
-  <path d="M255 366h2" stroke="#4db6ac" stroke-width="16" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Tesla Pulse Icon</title>
+  <desc id="desc">Minimal line-art icon with a single pulse line flowing into a car outline.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#a3e635"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="108" fill="url(#bg)"/>
+
+    <path d="M56 286h72l20-34 20 68 34-106 24 82h12"
+      fill="none" stroke="url(#signal)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <path d="M282 302h152c16 0 30-12 30-27 0-9-5-17-13-21l-33-16-24-29c-10-12-24-19-40-19h-34c-13 0-25 5-34 14l-25 24h-20"
+      fill="none" stroke="#e2e8f0" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M306 241h74" stroke="#e2e8f0" stroke-width="8" stroke-linecap="round"/>
+
+    <circle cx="322" cy="318" r="16" fill="none" stroke="#e2e8f0" stroke-width="9"/>
+    <circle cx="414" cy="318" r="16" fill="none" stroke="#e2e8f0" stroke-width="9"/>
+
+  <circle cx="58" cy="286" r="6" fill="#22d3ee"/>
 </svg>

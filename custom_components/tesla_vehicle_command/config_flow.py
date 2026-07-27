@@ -1,4 +1,4 @@
-"""Config flow for Tesla Vehicle Command integration."""
+"""Config flow for Tesla Pulse integration."""
 
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ STEP_KEY_SCHEMA = vol.Schema(
 
 
 class TeslaVehicleCommandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Tesla Vehicle Command."""
+    """Handle a config flow for Tesla Pulse."""
 
     VERSION = 1
 
@@ -393,7 +393,7 @@ class TeslaVehicleCommandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
 
         return self.async_create_entry(
-            title="Tesla Vehicle Command",
+            title="Tesla Pulse",
             data=data,
         )
 
@@ -429,7 +429,7 @@ class TeslaVehicleCommandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
-    """Handle Tesla Vehicle Command integration options."""
+    """Handle Tesla Pulse integration options."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
