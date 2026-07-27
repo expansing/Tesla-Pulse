@@ -72,6 +72,7 @@
       "charge_energy_added": { "name": "Charge Energy Added" },
       "time_to_full_charge": { "name": "Time to Full Charge" },
       "inside_temp": { "name": "Inside Temperature" },
+      "isolation_resistance": { "name": "Isolation Resistance" },
       "outside_temp": { "name": "Outside Temperature" },
       "driver_temp_setting": { "name": "Driver Temperature Setting" },
       "passenger_temp_setting": { "name": "Passenger Temperature Setting" },

@@ -111,19 +111,21 @@ class TeslaDefrostSwitch(TeslaVehicleCommandEntity, SwitchEntity):
         vehicle_data = self.coordinator.data.get(self.vin, {})
         response = vehicle_data.get("response", {})
         climate = response.get("climate_state", {})
-        return climate.get("defrost_mode", False)
+        mode = climate.get("defrost_mode")
+        if mode is None:
+            return None
+        if isinstance(mode, bool):
+            return mode
+        if isinstance(mode, (int, float)):
+            # 0=Unknown, 1=Off, 2=Normal, 3=Max, 4=AutoDefog
+            return int(mode) not in (0, 1)
+        normalized = str(mode).strip().lower()
+        return normalized not in ("", "off", "unknown", "none", "0")
 
     async def async_turn_on(self, **kwargs) -> None:
-        # Turn on climate with max settings
-        await self.coordinator.async_send_command(self.vin, "climate_on")
-        # Set max temp
-        await self.coordinator.async_send_command(
-            self.vin, "set_temps", {"driver_temp": 28, "passenger_temp": 28}
-        )
-        # Enable rear defrost
-        await self.coordinator.async_send_command(self.vin, "rear_defrost_on")
+        await self.coordinator.async_send_command(self.vin, "preconditioning_max")
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:
-        await self.coordinator.async_send_command(self.vin, "climate_off")
+        await self.coordinator.async_send_command(self.vin, "preconditioning_max_off")
         await self.coordinator.async_request_refresh()
