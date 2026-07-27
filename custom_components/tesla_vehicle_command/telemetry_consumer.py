@@ -253,8 +253,6 @@ class TelemetryConsumer:
             "IsolationResistance": (("charge_state", "isolation_resistance", self._to_float),),
             "ModuleTempMax": (("charge_state", "module_temp_max", self._to_float),),
             "ModuleTempMin": (("charge_state", "module_temp_min", self._to_float),),
-            "BrickVoltageMax": (("charge_state", "brick_voltage_max", self._to_millivolts),),
-            "BrickVoltageMin": (("charge_state", "brick_voltage_min", self._to_millivolts),),
             "NumBrickVoltageMax": (("charge_state", "num_brick_voltage_max", self._to_int),),
             "NumBrickVoltageMin": (("charge_state", "num_brick_voltage_min", self._to_int),),
             "NumModuleTempMax": (("charge_state", "num_module_temp_max", self._to_int),),
@@ -469,6 +467,7 @@ class TelemetryConsumer:
             vin,
             response,
             last_signals,
+            signals,
             received_fields,
             processed_fields,
             time.monotonic(),
@@ -540,6 +539,7 @@ class TelemetryConsumer:
         vin: str,
         response: dict[str, Any],
         last_signals: dict[str, Any],
+        signals: dict[str, Any],
         received_fields: set[str],
         processed_fields: set[str],
         now_monotonic: float,
@@ -569,16 +569,18 @@ class TelemetryConsumer:
             {"ACChargingEnergyIn", "DCChargingEnergyIn"} & received_fields
         )
 
-        # Track brick-voltage signal freshness to avoid computing transient imbalance.
+        # Publish brick extrema atomically. Fleet Telemetry can send their delta
+        # records separately; exposing one new extreme with the other extreme
+        # from an earlier record produces a physically impossible negative spread.
         telemetry_state = self._brick_voltage_state_by_vin.setdefault(vin, {})
         updated_brick_signals: set[str] = set()
         if _BRICK_VOLTAGE_MAX_SIGNAL in received_fields:
-            brick_max = charge_state.get("brick_voltage_max")
+            brick_max = self._to_millivolts(signals.get(_BRICK_VOLTAGE_MAX_SIGNAL))
             if isinstance(brick_max, (int, float)):
                 telemetry_state[_BRICK_VOLTAGE_MAX_SIGNAL] = (brick_max, now_monotonic)
                 updated_brick_signals.add(_BRICK_VOLTAGE_MAX_SIGNAL)
         if _BRICK_VOLTAGE_MIN_SIGNAL in received_fields:
-            brick_min = charge_state.get("brick_voltage_min")
+            brick_min = self._to_millivolts(signals.get(_BRICK_VOLTAGE_MIN_SIGNAL))
             if isinstance(brick_min, (int, float)):
                 telemetry_state[_BRICK_VOLTAGE_MIN_SIGNAL] = (brick_min, now_monotonic)
                 updated_brick_signals.add(_BRICK_VOLTAGE_MIN_SIGNAL)
@@ -596,7 +598,10 @@ class TelemetryConsumer:
             and now_monotonic - min_state[1] <= _BRICK_VOLTAGE_SYNC_WINDOW_SECONDS
         )
         if (has_same_record_pair or has_recent_pair) and max_state and min_state:
+            charge_state["brick_voltage_max"] = max_state[0]
+            charge_state["brick_voltage_min"] = min_state[0]
             charge_state["brick_voltage_imbalance"] = max_state[0] - min_state[0]
+            processed_fields.update(updated_brick_signals)
 
         # Calculate battery balance score (0-100%) - SOC-aware
         # Based on imbalance thresholds that vary by SOC:
