@@ -378,6 +378,15 @@ SENSOR_DESCRIPTIONS = [
         icon="mdi:flash",
     ),
     TeslaSensorEntityDescription(
+        key="isolation_resistance",
+        name="Isolation Resistance",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement="kOhm",
+        value_path="charge_state.isolation_resistance",
+        icon="mdi:resistor",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    TeslaSensorEntityDescription(
         key="module_temp_max",
         name="Module Temp Max",
         device_class=SensorDeviceClass.TEMPERATURE,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 import zmq
@@ -19,6 +20,9 @@ _LOGGER = logging.getLogger(__name__)
 
 # Hardcoded addon hostname for the telemetry receiver
 TELEMETRY_ADDON_HOSTNAME = "local-tesla-vehicle-command-telemetry"
+_BRICK_VOLTAGE_SYNC_WINDOW_SECONDS = 1.0
+_BRICK_VOLTAGE_MAX_SIGNAL = "BrickVoltageMax"
+_BRICK_VOLTAGE_MIN_SIGNAL = "BrickVoltageMin"
 
 
 class TelemetryConsumer:
@@ -38,6 +42,9 @@ class TelemetryConsumer:
         self._task: asyncio.Task | None = None
         self._running = False
         self._last_signals_by_vin: dict[str, dict[str, Any]] = {}
+        self._brick_voltage_state_by_vin: dict[
+            str, dict[str, tuple[float, float]]
+        ] = {}
         self._last_valid_pack_voltage: float | None = None
 
     async def async_start(self) -> None:
@@ -197,6 +204,7 @@ class TelemetryConsumer:
         response.setdefault("drive_state", {})
         response.setdefault("powertrain", {})
         response.setdefault("vehicle_config", {})
+        response.setdefault("gui_settings", {})
 
         # Map requested Fleet Telemetry signals to the Fleet API state structure.
         signal_mapping = {
@@ -242,6 +250,7 @@ class TelemetryConsumer:
             "LifetimeEnergyUsed": (("charge_state", "lifetime_energy_used", self._to_float),),
             "PackCurrent": (("charge_state", "pack_current", self._to_float),),
             "PackVoltage": (("charge_state", "pack_voltage", self._pack_voltage),),
+            "IsolationResistance": (("charge_state", "isolation_resistance", self._to_float),),
             "ModuleTempMax": (("charge_state", "module_temp_max", self._to_float),),
             "ModuleTempMin": (("charge_state", "module_temp_min", self._to_float),),
             "BrickVoltageMax": (("charge_state", "brick_voltage_max", self._to_millivolts),),
@@ -455,8 +464,14 @@ class TelemetryConsumer:
                     )
                 processed_fields.add(signal_name)
 
+        received_fields = set(signals)
         self._apply_charging_composites(
-            response, last_signals, set(signals), processed_fields
+            vin,
+            response,
+            last_signals,
+            received_fields,
+            processed_fields,
+            time.monotonic(),
         )
         self._apply_door_state(response, signals, processed_fields)
 
@@ -468,7 +483,7 @@ class TelemetryConsumer:
             processed_fields.add("Location")
 
         _LOGGER.debug("Updated telemetry data for %s: %d signals", vin, len(signals))
-        return set(signals), processed_fields
+        return received_fields, processed_fields
 
     @staticmethod
     def _decode_signals(data: dict[str, Any]) -> dict[str, Any]:
@@ -520,13 +535,14 @@ class TelemetryConsumer:
         if status == "online":
             _LOGGER.info("Vehicle %s came online via telemetry", vin)
 
-    @classmethod
     def _apply_charging_composites(
-        cls,
+        self,
+        vin: str,
         response: dict[str, Any],
         last_signals: dict[str, Any],
         received_fields: set[str],
         processed_fields: set[str],
+        now_monotonic: float,
     ) -> None:
         """Derive charge values delivered as AC/DC-specific telemetry fields."""
         charge_state = response["charge_state"]
@@ -553,11 +569,34 @@ class TelemetryConsumer:
             {"ACChargingEnergyIn", "DCChargingEnergyIn"} & received_fields
         )
 
-        # Calculate brick voltage imbalance from max/min
-        brick_max = charge_state.get("brick_voltage_max")
-        brick_min = charge_state.get("brick_voltage_min")
-        if isinstance(brick_max, (int, float)) and isinstance(brick_min, (int, float)):
-            charge_state["brick_voltage_imbalance"] = brick_max - brick_min
+        # Track brick-voltage signal freshness to avoid computing transient imbalance.
+        telemetry_state = self._brick_voltage_state_by_vin.setdefault(vin, {})
+        updated_brick_signals: set[str] = set()
+        if _BRICK_VOLTAGE_MAX_SIGNAL in received_fields:
+            brick_max = charge_state.get("brick_voltage_max")
+            if isinstance(brick_max, (int, float)):
+                telemetry_state[_BRICK_VOLTAGE_MAX_SIGNAL] = (brick_max, now_monotonic)
+                updated_brick_signals.add(_BRICK_VOLTAGE_MAX_SIGNAL)
+        if _BRICK_VOLTAGE_MIN_SIGNAL in received_fields:
+            brick_min = charge_state.get("brick_voltage_min")
+            if isinstance(brick_min, (int, float)):
+                telemetry_state[_BRICK_VOLTAGE_MIN_SIGNAL] = (brick_min, now_monotonic)
+                updated_brick_signals.add(_BRICK_VOLTAGE_MIN_SIGNAL)
+
+        max_state = telemetry_state.get(_BRICK_VOLTAGE_MAX_SIGNAL)
+        min_state = telemetry_state.get(_BRICK_VOLTAGE_MIN_SIGNAL)
+        has_same_record_pair = {
+            _BRICK_VOLTAGE_MAX_SIGNAL,
+            _BRICK_VOLTAGE_MIN_SIGNAL,
+        }.issubset(updated_brick_signals)
+        has_recent_pair = (
+            max_state is not None
+            and min_state is not None
+            and now_monotonic - max_state[1] <= _BRICK_VOLTAGE_SYNC_WINDOW_SECONDS
+            and now_monotonic - min_state[1] <= _BRICK_VOLTAGE_SYNC_WINDOW_SECONDS
+        )
+        if (has_same_record_pair or has_recent_pair) and max_state and min_state:
+            charge_state["brick_voltage_imbalance"] = max_state[0] - min_state[0]
 
         # Calculate battery balance score (0-100%) - SOC-aware
         # Based on imbalance thresholds that vary by SOC:
