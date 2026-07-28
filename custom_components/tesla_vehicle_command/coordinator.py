@@ -487,7 +487,15 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         brick_max = charge_state.get("brick_voltage_max")
         brick_min = charge_state.get("brick_voltage_min")
         if isinstance(brick_max, (int, float)) and isinstance(brick_min, (int, float)):
-            charge_state["brick_voltage_imbalance"] = brick_max - brick_min
+            imbalance = brick_max - brick_min
+            if imbalance >= 0:
+                charge_state["brick_voltage_imbalance"] = imbalance
+            else:
+                # Never publish an impossible imbalance from stale, independently
+                # cached telemetry extrema. A synchronized telemetry pair will
+                # replace these values on its next update.
+                charge_state.pop("brick_voltage_imbalance", None)
+                charge_state.pop("battery_balance_score", None)
 
         # Calculate battery balance score (0-100%) - SOC-aware
         # Based on imbalance thresholds that vary by SOC:
