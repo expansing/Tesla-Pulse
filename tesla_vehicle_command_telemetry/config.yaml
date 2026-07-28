@@ -1,15 +1,27 @@
 name: Tesla Fleet Telemetry Receiver
-version: "0.1.0"
+version: "0.2.0"
 slug: tesla_vehicle_command_telemetry
 description: Receives Tesla Fleet Telemetry over mTLS and publishes decoded records privately.
+
 arch:
   - aarch64
   - amd64
-  - armv7
-  - armhf
-ports:
-  4443/tcp: 4443
-map:
-  - config:ro
+
 startup: services
 boot: auto
+
+ports:
+  4443/tcp: 4443
+
+map:
+  - config:rw
+
+options:
+  log_level: info
+  json_log_enable: true
+  log_v_messages: false
+
+schema:
+  log_level: list(trace|debug|info|warn|error)
+  json_log_enable: bool
+  log_v_messages: bool
