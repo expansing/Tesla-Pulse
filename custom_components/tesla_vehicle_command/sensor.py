@@ -1462,6 +1462,32 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{vin}_{description.key}"
 
+    def _enum_default_value(self) -> Any:
+        """Return a sensible fallback for enum-like sensors when telemetry is missing."""
+        if self.entity_description.default_value is not None:
+            return self.entity_description.default_value
+
+        if self.entity_description.key == "shift_state":
+            return "Parking"
+
+        options = self.entity_description.options or []
+        preferred_defaults = (
+            "Off",
+            "off",
+            "Closed",
+            "Disabled",
+            "Not Present",
+            "Disconnected",
+            "No",
+            "Inactive",
+            "Unknown",
+        )
+        for candidate in preferred_defaults:
+            if candidate in options:
+                return candidate
+
+        return options[0] if options else None
+
     @property
     def native_value(self) -> Any:
         """Return the state of the sensor."""
@@ -1479,10 +1505,10 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
                     return None
 
         if value is None:
+            if self.entity_description.device_class == SensorDeviceClass.ENUM:
+                return self._enum_default_value()
             if self.entity_description.default_value is not None:
                 return self.entity_description.default_value
-            if self.entity_description.key == "shift_state":
-                return "Parking"
             return None
 
         if self.entity_description.value_map and value in self.entity_description.value_map:
@@ -1547,7 +1573,7 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
                 return "off"
             # Handle invalid/unknown values
             if text.lower() in ("<invalid>", "invalid", "unknown", "none"):
-                return None
+                return self._enum_default_value()
             # ClimateKeeperMode: "ClimateKeeperModeStateOff" -> "off", "ClimateKeeperModeStateDog" -> "dog"
             if text.startswith("ClimateKeeperMode"):
                 text = text[len("ClimateKeeperMode"):]
@@ -1596,6 +1622,6 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
             capitalized = text.capitalize()
             if capitalized in options:
                 return capitalized
-            return text
+            return self._enum_default_value() or text
 
         return value
