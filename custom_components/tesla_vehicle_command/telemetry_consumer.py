@@ -794,10 +794,23 @@ class TelemetryConsumer:
     def _charging_cable_type(self, value: Any) -> str:
         """Normalize a charging cable type enum."""
         text = str(value)
-        # Handle "ChargingCableTypeIEC" -> "IEC", "ChargingCableTypeSAE" -> "SAE", etc.
+        # Handle "ChargingCableTypeIEC" -> "IEC", "ChargingCableTypeStateIEC" -> "IEC".
         if text.startswith("ChargingCableType"):
             text = text[len("ChargingCableType"):]
-        return text.strip() or "Unknown"
+        marker = text.rfind("State")
+        if marker >= 0:
+            text = text[marker + len("State"):]
+
+        normalized = text.strip().replace("-", "_").upper()
+        aliases = {
+            "GBAC": "GB_AC",
+            "GBDC": "GB_DC",
+            "IEC": "IEC",
+            "SAE": "SAE",
+            "SNA": "SNA",
+            "UNKNOWN": "Unknown",
+        }
+        return aliases.get(normalized, normalized or "Unknown")
 
     def _fast_charger_type(self, value: Any) -> str:
         """Normalize a fast charger type enum."""
@@ -829,8 +842,28 @@ class TelemetryConsumer:
 
     @classmethod
     def _window_position(cls, value: Any) -> int:
-        """Return the Fleet API's binary door/window representation."""
-        return 1 if cls._is_truthy(value) else 0
+        """Return the Fleet API binary window representation (1=open, 0=closed)."""
+        if value is None:
+            return 0
+
+        if isinstance(value, bool):
+            return 1 if value else 0
+
+        if isinstance(value, (int, float)):
+            # Some telemetry streams expose window position as 0..100; >0 means open/vented.
+            return 1 if float(value) > 0 else 0
+
+        text = cls._enum_tail(value).strip().lower()
+        if not text:
+            return 0
+
+        if text in {"open", "opened", "vent", "vented", "partiallyopen", "ajar", "true", "on", "1"}:
+            return 1
+        if text in {"closed", "close", "shut", "false", "off", "0"}:
+            return 0
+
+        # Fallback: if the token contains an open-like keyword, treat it as open.
+        return 1 if ("open" in text or "vent" in text) else 0
 
     @classmethod
     def _is_sentry_active(cls, value: Any) -> bool:
