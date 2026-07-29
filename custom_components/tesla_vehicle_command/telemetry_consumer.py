@@ -219,7 +219,7 @@ class TelemetryConsumer:
             "DetailedChargeState": (("charge_state", "charging_state", self._charge_state),),
             "ChargeLimitSoc": (("charge_state", "charge_limit_soc", self._to_int),),
             "TimeToFullCharge": (("charge_state", "time_to_full_charge", self._to_float),),
-            "ChargerVoltage": (("charge_state", "charger_voltage", self._to_int),),
+            "ChargerVoltage": (("charge_state", "charger_voltage", self._charger_voltage),),
             "ChargeAmps": (
                 ("charge_state", "charger_actual_current", self._to_int),
             ),
@@ -727,8 +727,25 @@ class TelemetryConsumer:
     @classmethod
     def _shift_state(cls, value: Any) -> str | None:
         """Normalize a shift-state enum to Tesla's single-letter API form."""
-        state = cls._enum_tail(value).strip().upper()[:1]
-        return state if state in {"P", "D", "R", "N"} else None
+        token = cls._enum_tail(value).strip().upper()
+        if not token:
+            return None
+
+        # Accept only explicit gear tokens to avoid mapping values like
+        # "NA"/"NotAvailable" to Neutral by first-letter matching.
+        direct_map = {
+            "P": "P",
+            "PARK": "P",
+            "PARKING": "P",
+            "D": "D",
+            "DRIVE": "D",
+            "DRIVING": "D",
+            "R": "R",
+            "REVERSE": "R",
+            "N": "N",
+            "NEUTRAL": "N",
+        }
+        return direct_map.get(token)
 
     @classmethod
     def _charge_state(cls, value: Any) -> str:
@@ -793,21 +810,33 @@ class TelemetryConsumer:
 
     def _charging_cable_type(self, value: Any) -> str:
         """Normalize a charging cable type enum."""
-        text = str(value)
-        # Handle "ChargingCableTypeIEC" -> "IEC", "ChargingCableTypeStateIEC" -> "IEC".
-        if text.startswith("ChargingCableType"):
-            text = text[len("ChargingCableType"):]
-        marker = text.rfind("State")
-        if marker >= 0:
-            text = text[marker + len("State"):]
+        if value is None:
+            return "None"
 
-        normalized = text.strip().replace("-", "_").upper()
+        normalized = str(value).strip().replace("-", "_").upper()
+        for prefix in (
+            "CHARGING_CABLE_TYPE_STATE_",
+            "CHARGING_CABLE_TYPE_",
+            "CHARGINGCABLETYPESTATE",
+            "CHARGINGCABLETYPE",
+            "CABLE_TYPE_STATE_",
+            "CABLE_TYPE_",
+            "CABLETYPESTATE",
+            "CABLETYPE",
+        ):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+                break
+
         aliases = {
             "GBAC": "GB_AC",
             "GBDC": "GB_DC",
             "IEC": "IEC",
             "SAE": "SAE",
             "SNA": "SNA",
+            "NONE": "None",
+            "<INVALID>": "None",
+            "INVALID": "None",
             "UNKNOWN": "Unknown",
         }
         return aliases.get(normalized, normalized or "Unknown")
@@ -839,6 +868,12 @@ class TelemetryConsumer:
 
         # Return last valid voltage if available, otherwise None to ignore transient
         return self._last_valid_pack_voltage
+
+    @staticmethod
+    def _charger_voltage(value: Any) -> int | None:
+        """Ignore transient low-voltage noise while the vehicle is not charging."""
+        voltage = TelemetryConsumer._to_int(value)
+        return voltage if voltage is not None and voltage >= 20 else None
 
     @classmethod
     def _window_position(cls, value: Any) -> int:
