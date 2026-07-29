@@ -26,6 +26,7 @@ This guide configures all four parts using the Home Assistant Add-on Store, a mi
 - [7. Install and Configure the Integration](#7-install-and-configure-the-integration)
 - [8. Pair the Existing Command Key With the Vehicle](#8-pair-the-existing-command-key-with-the-vehicle)
 - [9. Enable Fleet Telemetry](#9-enable-fleet-telemetry)
+- [Startup State Restoration](#startup-state-restoration)
 - [Verify the Installation](#verify-the-installation)
 - [Battery Health Sensors](#battery-health-sensors)
 - [PEM and Add-on Diagnostics](#pem-and-add-on-diagnostics)
@@ -359,6 +360,14 @@ The integration creates the following private internal proxy files automatically
 
 Do not edit these generated files. The integration and local proxy use the Supervisor DNS hostname `local-tesla-vehicle-command-proxy` internally.
 
+### Startup State Restoration
+
+Tesla Pulse saves the most recently received telemetry state locally. After a Home Assistant restart or an integration reload, it restores those cached entity states before waiting for new Fleet Telemetry records. This keeps the vehicle asleep while preserving the last known sensor values.
+
+By default, Tesla Pulse does not wake vehicles or request fresh Fleet API data during startup. To opt in, open **Settings > Devices & services > Tesla Pulse > Configure** and enable **Wake vehicle and refresh from API on startup**.
+
+When enabled, Tesla Pulse restores the cache first, then wakes every configured vehicle and requests fresh vehicle data. This can increase Fleet API traffic and wake the vehicle, so leave it disabled when preserving sleep is more important than immediately refreshed data.
+
 ## 8. Pair the Existing Command Key With the Vehicle
 
 With the vehicle online and the Tesla mobile app signed in, open:
@@ -376,7 +385,7 @@ If the vehicle reports that the public key is not paired, do not generate a repl
 Fleet Telemetry is required for vehicle state. The receiver accepts the vehicle's mTLS stream and publishes decoded records on a private ZMQ endpoint.
 
 > [!IMPORTANT]
-> The integration never calls Tesla's `vehicle_data` endpoint after setup. Entity state is restored from Home Assistant's local telemetry cache and then updated only by incoming Fleet Telemetry records. Until the receiver has delivered a field, its corresponding entity has no state.
+> By default, the integration restores entity state from Home Assistant's local telemetry cache and then updates it only with incoming Fleet Telemetry records. If **Wake vehicle and refresh from API on startup** is enabled, it also requests fresh vehicle data after waking each configured vehicle during startup. Until the receiver or optional API refresh has delivered a field, its corresponding entity has no state.
 
 ### Dummy Example
 
