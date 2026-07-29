@@ -27,6 +27,7 @@ CONF_NAME = "name"
 CONF_PRIVATE_KEY_PATH = "private_key_path"
 CONF_TELEMETRY_HOSTNAME = "telemetry_hostname"
 CONF_TELEMETRY_PORT = "telemetry_port"
+CONF_WAKE_BEFORE_COMMAND = "wake_before_command"
 CONF_WAKE_ON_STARTUP = "wake_on_startup"
 
 # OAuth2

@@ -22,6 +22,7 @@ from .const import (
     COMMANDS,
     CONF_TELEMETRY_HOSTNAME,
     CONF_TELEMETRY_PORT,
+    CONF_WAKE_BEFORE_COMMAND,
     DOMAIN,
     PROXY_HOST,
     PROXY_PORT,
@@ -682,6 +683,13 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Send a command to the vehicle."""
         if not self.proxy_manager.is_running:
             raise RuntimeError("Proxy not running")
+
+        if (
+            command != "wake_up"
+            and self.entry.options.get(CONF_WAKE_BEFORE_COMMAND, False)
+        ):
+            _LOGGER.debug("Waking vehicle %s before command %s", vin, command)
+            await self.async_wake_up(vin)
 
         await self._ensure_valid_token()
 
