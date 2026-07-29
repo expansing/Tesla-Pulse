@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Tesla Pulse Setup",
-        "description": "Enter your Tesla Developer App credentials. You can create an app at https://developer.tesla.com",
+        "description": "Enter your Tesla Developer App credentials. You can create an app at [Tesla Developer Portal]({docs_url}).",
         "data": {
           "client_id": "Client ID",
           "client_secret": "Client Secret"
