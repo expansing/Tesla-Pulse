@@ -26,6 +26,7 @@ from .const import (
     CONF_FLEET_API_BASE_URL,
     CONF_TELEMETRY_HOSTNAME,
     CONF_TELEMETRY_PORT,
+    CONF_WAKE_ON_STARTUP,
     CONF_VEHICLES,
     CONF_VIN,
     CONF_NAME,
@@ -444,6 +445,7 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
         telemetry_port = self.config_entry.options.get(
             CONF_TELEMETRY_PORT, DEFAULT_TELEMETRY_PORT
         )
+        wake_on_startup = self.config_entry.options.get(CONF_WAKE_ON_STARTUP, False)
         schema = vol.Schema(
             {
                 vol.Optional(
@@ -459,6 +461,9 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                         mode=selector.NumberSelectorMode.BOX,
                     )
                 ),
+                vol.Required(
+                    CONF_WAKE_ON_STARTUP, default=wake_on_startup
+                ): selector.BooleanSelector(),
             }
         )
 

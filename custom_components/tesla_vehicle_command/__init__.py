@@ -12,7 +12,7 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 import voluptuous as vol
 
-from .const import DOMAIN
+from .const import CONF_WAKE_ON_STARTUP, DOMAIN
 from .coordinator import TeslaVehicleCommandCoordinator
 from .proxy_manager import ProxyManager
 from .telemetry_consumer import TelemetryConsumer, async_setup_telemetry_consumer
@@ -72,22 +72,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_load_telemetry_cache()
     await coordinator.async_config_entry_first_refresh()
 
-    # Fetch initial vehicle data for all vehicles to populate sensors
-    for vehicle in coordinator.vehicles:
-        vin = vehicle["vin"]
-        # Wake up vehicle first to ensure we can get data
-        try:
-            await coordinator.async_wake_up(vin)
-            _LOGGER.info("Woke up vehicle %s", vin)
-        except Exception as err:
-            _LOGGER.warning("Failed to wake up vehicle %s: %s", vin, err)
-        
-        initial_data = await coordinator.async_fetch_initial_vehicle_data(vin)
-        if initial_data and "response" in initial_data:
-            # Process the response to compute derived fields
-            processed_response = coordinator._process_vehicle_response(initial_data["response"])
-            coordinator.set_telemetry_data(vin, processed_response)
-            _LOGGER.info("Fetched initial vehicle data for %s", vin)
+    if entry.options.get(CONF_WAKE_ON_STARTUP, False):
+        # Refresh cached state from the Fleet API only when the user opts in.
+        for vehicle in coordinator.vehicles:
+            vin = vehicle["vin"]
+            try:
+                await coordinator.async_wake_up(vin)
+                _LOGGER.info("Woke up vehicle %s", vin)
+            except Exception as err:
+                _LOGGER.warning("Failed to wake up vehicle %s: %s", vin, err)
+
+            initial_data = await coordinator.async_fetch_initial_vehicle_data(vin)
+            if initial_data and "response" in initial_data:
+                processed_response = coordinator._process_vehicle_response(
+                    initial_data["response"]
+                )
+                coordinator.set_telemetry_data(vin, processed_response)
+                _LOGGER.info("Fetched initial vehicle data for %s", vin)
+    else:
+        _LOGGER.info("Restored cached telemetry state without waking vehicles")
 
     # Initialize telemetry consumer (auto-discovers endpoint via Supervisor API)
     telemetry_consumer = await async_setup_telemetry_consumer(hass, coordinator)
