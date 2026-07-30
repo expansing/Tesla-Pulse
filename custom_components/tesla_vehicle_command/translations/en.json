@@ -137,7 +137,6 @@
       "wake_up": { "name": "Wake Up" },
       "honk_horn": { "name": "Honk Horn" },
       "flash_lights": { "name": "Flash Lights" },
-      "fart": { "name": "Fart" },
       "open_charge_port": { "name": "Open Charge Port" },
       "close_charge_port": { "name": "Close Charge Port" },
       "open_trunk": { "name": "Open Trunk" },

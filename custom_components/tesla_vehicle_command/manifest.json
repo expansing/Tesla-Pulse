@@ -10,5 +10,5 @@
   "issue_tracker": "https://github.com/expansing/tesla_vehicle_command/issues",
   "loggers": ["tesla_vehicle_command"],
   "requirements": ["aiohttp>=3.9.0", "cryptography>=42.0.0", "pyjwt>=2.8.0", "pyzmq>=25.0.0"],
-  "version": "0.6.11"
+  "version": "0.6.12"
 }
