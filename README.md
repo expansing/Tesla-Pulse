@@ -368,6 +368,19 @@ By default, Tesla Pulse does not wake vehicles or request fresh Fleet API data d
 
 When enabled, Tesla Pulse restores the cache first, then wakes every configured vehicle and requests fresh vehicle data. This can increase Fleet API traffic and wake the vehicle, so leave it disabled when preserving sleep is more important than immediately refreshed data.
 
+Tesla Pulse also exposes a **Vehicle Awake Status** diagnostic sensor. A vehicle is `Awake` while Fleet Telemetry frames are arriving and becomes `Asleep` after the configured **Minutes without telemetry before vehicle is asleep** interval.
+
+Enable **Wake vehicle before sending commands** to avoid command failures while a vehicle is asleep. Before a command is sent, Tesla Pulse checks **Vehicle Awake Status**:
+
+1. If the vehicle is already awake, the command is sent immediately.
+2. If the vehicle is asleep, Tesla Pulse sends a wake-up request.
+3. Tesla Pulse waits for the next vehicle telemetry frame, confirming that the vehicle is awake.
+4. The original command is sent only after that confirmation.
+
+Commands for the same vehicle are serialized while this sequence runs. If no telemetry frame arrives within 90 seconds after wake-up, the command fails with an explicit timeout instead of being sent prematurely.
+
+Advanced rear-left and rear-right powertrain diagnostics are disabled by default because many vehicles do not expose those channels. They can be enabled manually from the vehicle's entity list when supported. Tesla `<INVALID>` values are not used to auto-disable entities because they may indicate a temporarily inactive signal rather than absent hardware.
+
 ## 8. Pair the Existing Command Key With the Vehicle
 
 With the vehicle online and the Tesla mobile app signed in, open:

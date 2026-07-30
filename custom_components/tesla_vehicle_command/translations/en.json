@@ -49,6 +49,7 @@
         "data": {
           "update_interval": "Vehicle update interval",
           "telemetry_hostname": "Fleet Telemetry hostname",
+          "telemetry_inactivity_minutes": "Minutes without telemetry before vehicle is asleep",
           "telemetry_port": "Fleet Telemetry port",
           "wake_before_command": "Wake vehicle before sending commands",
           "wake_on_startup": "Wake vehicle and refresh from API on startup"
@@ -56,6 +57,7 @@
         "data_description": {
           "update_interval": "Seconds between fallback vehicle-data requests. Short intervals can keep the vehicle awake and increase Fleet API traffic.",
           "telemetry_hostname": "Public DNS hostname for the Tesla Fleet Telemetry receiver. Leave blank until the telemetry add-on and public network route are ready.",
+          "telemetry_inactivity_minutes": "After this interval without a vehicle telemetry frame, Tesla Pulse marks the vehicle as asleep. Commands with wake-before-command enabled wait for a new frame before execution.",
           "telemetry_port": "Public TCP port for the Fleet Telemetry receiver.",
           "wake_before_command": "When enabled, wakes the vehicle before each command. This prevents commands from failing while the vehicle is asleep, but can increase Fleet API traffic and keep the vehicle awake.",
           "wake_on_startup": "When enabled, wakes each vehicle and refreshes its state through the Fleet API after Home Assistant starts. When disabled, the last cached telemetry state is restored and the vehicle remains asleep until telemetry arrives."
@@ -66,6 +68,7 @@
   "entity": {
     "sensor": {
       "telemetry_status": { "name": "Telemetry Status" },
+      "vehicle_awake_status": { "name": "Vehicle Awake Status" },
       "battery_level": { "name": "Battery Level" },
       "battery_range": { "name": "Battery Range" },
       "ideal_battery_range": { "name": "Ideal Battery Range" },

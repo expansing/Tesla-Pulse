@@ -36,6 +36,23 @@ from .entity import TeslaVehicleCommandEntity
 
 _LOGGER = logging.getLogger(__name__)
 
+_OPTIONAL_POWERTRAIN_SENSOR_KEYS = {
+    "di_axle_speed_rel",
+    "di_axle_speed_rer",
+    "di_heatsink_trel",
+    "di_heatsink_trer",
+    "di_inverter_trel",
+    "di_inverter_trer",
+    "di_motor_current_rel",
+    "di_motor_current_rer",
+    "di_state_rel",
+    "di_state_rer",
+    "di_stator_temp_rel",
+    "di_stator_temp_rer",
+    "di_torque_actual_rel",
+    "di_torque_actual_rer",
+}
+
 
 @dataclass(frozen=True, kw_only=True)
 class TeslaSensorEntityDescription(SensorEntityDescription):
@@ -227,7 +244,7 @@ SENSOR_DESCRIPTIONS = [
         key="charge_port_latch",
         name="Charge Port Latch",
         device_class=SensorDeviceClass.ENUM,
-        options=["Engaged", "Disengaged", "Unknown", "ChargePortLatchEngaged"],
+        options=["Engaged", "Disengaged", "Unknown"],
         value_path="charge_state.charge_port_latch",
         icon="mdi:ev-plug-type2",
         default_value="Unknown",
@@ -1266,6 +1283,8 @@ SENSOR_DESCRIPTIONS = [
     TeslaSensorEntityDescription(
         key="hvil_status",
         name="HVIL Status",
+        device_class=SensorDeviceClass.ENUM,
+        options=["OK", "Fault", "Open", "Closed", "Unknown"],
         value_path="powertrain.hvil_status",
         icon="mdi:shield-alert",
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -1336,11 +1355,11 @@ SENSOR_DESCRIPTIONS = [
     ),
     TeslaSensorEntityDescription(
         key="sun_roof_installed",
-        name="Sunroof Installed",
+        name="Panoramic Roof Present",
         device_class=SensorDeviceClass.ENUM,
-        options=["True", "False"],
+        options=["Present", "Not Present", "Unknown"],
         value_path="vehicle_config.sun_roof_installed",
-        icon="mdi:sun-roof",
+        icon="mdi:car-panoramic-roof",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     TeslaSensorEntityDescription(
@@ -1379,6 +1398,7 @@ async def async_setup_entry(
     entity_registry = er.async_get(hass)
     current_keys = {desc.key for desc in SENSOR_DESCRIPTIONS}
     current_keys.add("telemetry_status")  # TeslaTelemetryStatusSensor
+    current_keys.add("vehicle_awake_status")
 
     for vehicle in coordinator.vehicles:
         vin = vehicle["vin"]
@@ -1394,6 +1414,7 @@ async def async_setup_entry(
     for vehicle in coordinator.vehicles:
         vin = vehicle["vin"]
         entities.append(TeslaTelemetryStatusSensor(coordinator, vin, vehicle["name"]))
+        entities.append(TeslaVehicleAwakeStatusSensor(coordinator, vin, vehicle["name"]))
         for description in SENSOR_DESCRIPTIONS:
             entities.append(TeslaSensorEntity(coordinator, vin, vehicle["name"], description))
 
@@ -1445,6 +1466,37 @@ class TeslaTelemetryStatusSensor(TeslaVehicleCommandEntity, SensorEntity):
         }
 
 
+class TeslaVehicleAwakeStatusSensor(TeslaVehicleCommandEntity, SensorEntity):
+    """Sensor reporting whether recent telemetry indicates the vehicle is awake."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:car-connected"
+    _attr_options = ["Awake", "Asleep"]
+    _attr_translation_key = "vehicle_awake_status"
+
+    def __init__(
+        self,
+        coordinator: TeslaVehicleCommandCoordinator,
+        vin: str,
+        vehicle_name: str,
+    ) -> None:
+        """Initialize the vehicle awake status sensor."""
+        super().__init__(coordinator, vin, vehicle_name)
+        self._attr_unique_id = f"{vin}_vehicle_awake_status"
+
+    @property
+    def native_value(self) -> str:
+        """Return the telemetry-derived vehicle activity state."""
+        return "Awake" if self.coordinator.is_vehicle_awake(self.vin) else "Asleep"
+
+    @property
+    def available(self) -> bool:
+        """Expose activity state even before the first telemetry frame."""
+        return True
+
+
 class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
     """Sensor entity for Tesla vehicle data."""
 
@@ -1461,6 +1513,9 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
         super().__init__(coordinator, vin, vehicle_name)
         self.entity_description = description
         self._attr_unique_id = f"{vin}_{description.key}"
+        self._attr_entity_registry_enabled_default = (
+            description.key not in _OPTIONAL_POWERTRAIN_SENSOR_KEYS
+        )
 
     def _enum_default_value(self) -> Any:
         """Return a sensible fallback for enum-like sensors when telemetry is missing."""

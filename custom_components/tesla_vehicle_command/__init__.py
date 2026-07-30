@@ -174,6 +174,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if unload_ok:
         data = hass.data[DOMAIN].pop(entry.entry_id)
+        data["coordinator"].shutdown()
         await data["proxy_manager"].async_stop()
         if data.get("telemetry_consumer"):
             await data["telemetry_consumer"].async_stop()

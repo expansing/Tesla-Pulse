@@ -25,6 +25,7 @@ from .const import (
     CONF_CLIENT_SECRET,
     CONF_FLEET_API_BASE_URL,
     CONF_TELEMETRY_HOSTNAME,
+    CONF_TELEMETRY_INACTIVITY_MINUTES,
     CONF_TELEMETRY_PORT,
     CONF_WAKE_BEFORE_COMMAND,
     CONF_WAKE_ON_STARTUP,
@@ -36,8 +37,11 @@ from .const import (
     FLEET_API_BASE_URL_EU,
     FLEET_API_BASE_URL_NA,
     DEFAULT_TELEMETRY_PORT,
+    DEFAULT_TELEMETRY_INACTIVITY_MINUTES,
     MAX_TELEMETRY_PORT,
+    MAX_TELEMETRY_INACTIVITY_MINUTES,
     MIN_TELEMETRY_PORT,
+    MIN_TELEMETRY_INACTIVITY_MINUTES,
     OAUTH2_AUTHORIZE,
     OAUTH2_SCOPES,
     OAUTH2_TOKEN,
@@ -443,6 +447,10 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
         telemetry_hostname = self.config_entry.options.get(
             CONF_TELEMETRY_HOSTNAME, ""
         )
+        telemetry_inactivity_minutes = self.config_entry.options.get(
+            CONF_TELEMETRY_INACTIVITY_MINUTES,
+            DEFAULT_TELEMETRY_INACTIVITY_MINUTES,
+        )
         telemetry_port = self.config_entry.options.get(
             CONF_TELEMETRY_PORT, DEFAULT_TELEMETRY_PORT
         )
@@ -455,6 +463,17 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_TELEMETRY_HOSTNAME, default=telemetry_hostname
                 ): str,
+                vol.Required(
+                    CONF_TELEMETRY_INACTIVITY_MINUTES,
+                    default=telemetry_inactivity_minutes,
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=MIN_TELEMETRY_INACTIVITY_MINUTES,
+                        max=MAX_TELEMETRY_INACTIVITY_MINUTES,
+                        step=1,
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
                 vol.Required(
                     CONF_TELEMETRY_PORT, default=telemetry_port
                 ): selector.NumberSelector(

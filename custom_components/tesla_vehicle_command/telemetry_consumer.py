@@ -231,7 +231,7 @@ class TelemetryConsumer:
             "ChargeCurrentRequest": (("charge_state", "charge_current_request", self._to_int),),
             "ChargeCurrentRequestMax": (("charge_state", "charge_current_request_max", self._to_int),),
             "ChargeEnableRequest": (("charge_state", "charge_enable_request", self._is_truthy),),
-            "ChargePortLatch": (("charge_state", "charge_port_latch", None),),
+            "ChargePortLatch": (("charge_state", "charge_port_latch", self._charge_port_latch),),
             "ChargeRateMilePerHour": (("charge_state", "charge_rate", self._to_float),),
             "ChargerPhases": (("charge_state", "charger_phases", self._to_int),),
             "ChargingCableType": (("charge_state", "conn_charge_cable", self._charging_cable_type),),
@@ -339,7 +339,7 @@ class TelemetryConsumer:
             "TonneauOpenPercent": (("vehicle_state", "tonneau_open_percent", None),),
             "TonneauPosition": (("vehicle_state", "tonneau_position", None),),
             "TonneauTentMode": (("vehicle_state", "tonneau_tent_mode", None),),
-            "CarType": (("vehicle_config", "car_type", None),),
+            "CarType": (("vehicle_config", "car_type", self._car_type),),
             "EfficiencyPackage": (("vehicle_config", "efficiency_package", None),),
             "EuropeVehicle": (("vehicle_config", "eu_vehicle", self._is_truthy),),
             "ExteriorColor": (("vehicle_config", "exterior_color", None),),
@@ -347,7 +347,7 @@ class TelemetryConsumer:
             "RearSeatHeaters": (("vehicle_config", "rear_seat_heaters", None),),
             "RightHandDrive": (("vehicle_config", "rhd", self._is_truthy),),
             "RoofColor": (("vehicle_config", "roof_color", None),),
-            "SunroofInstalled": (("vehicle_config", "sun_roof_installed", None),),
+            "SunroofInstalled": (("vehicle_config", "sun_roof_installed", self._presence),),
             "Trim": (("vehicle_config", "trim_badging", None),),
             "WheelType": (("vehicle_config", "wheel_type", None),),
             "ChargePort": (("vehicle_config", "charge_port_type", None),),
@@ -426,7 +426,7 @@ class TelemetryConsumer:
             "DiVBatR": (("powertrain", "di_vbat_r", None),),
             "DiVBatREL": (("powertrain", "di_vbat_rel", None),),
             "DiVBatRER": (("powertrain", "di_vbat_rer", None),),
-            "Hvil": (("powertrain", "hvil_status", None),),
+            "Hvil": (("powertrain", "hvil_status", self._hvil_status),),
             
             # Safety/Service
             "TpmsHardWarnings": (("vehicle_state", "tpms_hard_warning_fl", None), ("vehicle_state", "tpms_hard_warning_fr", None), ("vehicle_state", "tpms_hard_warning_rl", None), ("vehicle_state", "tpms_hard_warning_rr", None)),
@@ -840,6 +840,43 @@ class TelemetryConsumer:
             "UNKNOWN": "Unknown",
         }
         return aliases.get(normalized, normalized or "Unknown")
+
+    @staticmethod
+    def _charge_port_latch(value: Any) -> str:
+        """Normalize a charge-port latch enum."""
+        text = str(value).strip()
+        for prefix in ("ChargePortLatchState", "ChargePortLatch"):
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+                break
+        return text if text in {"Engaged", "Disengaged"} else "Unknown"
+
+    @staticmethod
+    def _car_type(value: Any) -> str | None:
+        """Remove the redundant protobuf prefix from a vehicle model."""
+        if value is None:
+            return None
+        text = str(value).strip()
+        if text.startswith("CarType"):
+            text = text[len("CarType"):]
+        return text or None
+
+    @staticmethod
+    def _hvil_status(value: Any) -> str:
+        """Normalize the high-voltage interlock status enum."""
+        text = str(value).strip()
+        for prefix in ("HvilStatus", "HvilState", "Hvil"):
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+                break
+        return text or "Unknown"
+
+    @classmethod
+    def _presence(cls, value: Any) -> str:
+        """Normalize a hardware-presence signal."""
+        if value is None:
+            return "Unknown"
+        return "Present" if cls._is_truthy(value) else "Not Present"
 
     def _fast_charger_type(self, value: Any) -> str:
         """Normalize a fast charger type enum."""
