@@ -1,0 +1,118 @@
+name: Publish Release
+
+on:
+  push:
+    branches:
+      - release
+    paths:
+      - custom_components/tesla_vehicle_command/manifest.json
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Tag and Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect manifest version change
+        id: version
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest_path="custom_components/tesla_vehicle_command/manifest.json"
+          current_version="$(jq -r '.version' "$manifest_path")"
+
+          previous_version=""
+          if [[ -n "${BEFORE_SHA:-}" && "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]]; then
+            if git cat-file -e "${BEFORE_SHA}:${manifest_path}" 2>/dev/null; then
+              previous_version="$(git show "${BEFORE_SHA}:${manifest_path}" | jq -r '.version')"
+            fi
+          fi
+
+          echo "current_version=${current_version}" >> "$GITHUB_OUTPUT"
+          echo "previous_version=${previous_version}" >> "$GITHUB_OUTPUT"
+
+          if [[ -n "$previous_version" && "$previous_version" == "$current_version" ]]; then
+            echo "version_changed=false" >> "$GITHUB_OUTPUT"
+            echo "Manifest version is unchanged (${current_version}); skipping release."
+          else
+            echo "version_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Manifest version changed from '${previous_version:-<none>}' to '${current_version}'."
+          fi
+
+      - name: Create tag and release
+        if: steps.version.outputs.version_changed == 'true'
+        uses: actions/github-script@v7
+        env:
+          VERSION: ${{ steps.version.outputs.current_version }}
+        with:
+          script: |
+            const version = process.env.VERSION;
+            const tag = `v${version}`;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const commitSha = context.sha;
+
+            core.info(`Preparing release for ${owner}/${repo} with tag ${tag}`);
+
+            let tagExists = true;
+            try {
+              await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
+            } catch (error) {
+              if (error.status === 404) {
+                tagExists = false;
+              } else {
+                throw error;
+              }
+            }
+
+            if (!tagExists) {
+              await github.rest.git.createRef({
+                owner,
+                repo,
+                ref: `refs/tags/${tag}`,
+                sha: commitSha,
+              });
+              core.info(`Created tag ${tag} at ${commitSha}`);
+            } else {
+              core.info(`Tag ${tag} already exists; reusing it.`);
+            }
+
+            let releaseExists = true;
+            try {
+              await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+            } catch (error) {
+              if (error.status === 404) {
+                releaseExists = false;
+              } else {
+                throw error;
+              }
+            }
+
+            if (!releaseExists) {
+              await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: tag,
+                target_commitish: commitSha,
+                name: tag,
+                generate_release_notes: true,
+              });
+              core.info(`Created release ${tag}`);
+            } else {
+              core.info(`Release for ${tag} already exists; nothing to do.`);
+            }
