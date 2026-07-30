@@ -379,7 +379,7 @@ Enable **Wake vehicle before sending commands** to avoid command failures while 
 
 Commands for the same vehicle are serialized while this sequence runs. If no telemetry frame arrives within 90 seconds after wake-up, the command fails with an explicit timeout instead of being sent prematurely.
 
-Advanced rear-left and rear-right powertrain diagnostics are disabled by default because many vehicles do not expose those channels. They can be enabled manually from the vehicle's entity list when supported. Tesla `<INVALID>` values are not used to auto-disable entities because they may indicate a temporarily inactive signal rather than absent hardware.
+Advanced rear-left and rear-right powertrain diagnostics are disabled by default because many vehicles do not expose those channels. Tesla Pulse also evaluates explicit optional telemetry groups across completed awake sessions. After at least two sessions containing three or more vehicle telemetry frames without a valid group signal, it disables the corresponding REL/RER or Powershare entities. A valid signal re-enables only entities that Tesla Pulse disabled itself; manually disabled entities are unchanged. Tonneau, sunroof, and rear-display HVAC capability observations are retained for future entity support, but have no current entity to enable or disable. Tesla `<INVALID>` values are not used as evidence of absent hardware.
 
 ## 8. Pair the Existing Command Key With the Vehicle
 
