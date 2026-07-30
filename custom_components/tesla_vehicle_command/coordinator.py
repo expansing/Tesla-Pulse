@@ -333,13 +333,30 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         processed_fields: set[str],
     ) -> None:
         """Record a successfully processed telemetry message for a vehicle."""
+        metadata = self._telemetry_metadata.get(vin, {})
         self._telemetry_metadata[vin] = {
+            **metadata,
             "last_received": datetime.now().astimezone(),
+            "connectivity_status": "ONLINE",
             "received_fields": sorted(received_fields),
             "processed_fields": sorted(processed_fields),
         }
         self._telemetry_events.setdefault(vin, asyncio.Event()).set()
         self._schedule_sleep_transition(vin)
+
+    def set_connectivity_status(self, vin: str, status: str) -> None:
+        """Record an explicit vehicle connectivity state from Fleet Telemetry."""
+        normalized_status = status.strip().upper()
+        metadata = self._telemetry_metadata.setdefault(vin, {})
+        metadata["connectivity_status"] = normalized_status
+
+        if normalized_status == "DISCONNECTED":
+            if timer := self._sleep_timers.pop(vin, None):
+                timer.cancel()
+        elif normalized_status in {"CONNECTED", "ONLINE"}:
+            self._schedule_sleep_transition(vin)
+
+        self.async_update_listeners()
 
     @property
     def telemetry_inactivity_timeout(self) -> timedelta:
@@ -351,8 +368,15 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return timedelta(minutes=float(minutes))
 
     def is_vehicle_awake(self, vin: str) -> bool:
-        """Return whether the vehicle sent telemetry within the active window."""
-        last_received = self._telemetry_metadata.get(vin, {}).get("last_received")
+        """Return the connectivity state, falling back to telemetry freshness."""
+        metadata = self._telemetry_metadata.get(vin, {})
+        connectivity_status = metadata.get("connectivity_status")
+        if connectivity_status == "DISCONNECTED":
+            return False
+        if connectivity_status in {"CONNECTED", "ONLINE"}:
+            return True
+
+        last_received = metadata.get("last_received")
         return bool(
             isinstance(last_received, datetime)
             and datetime.now().astimezone() - last_received
@@ -465,6 +489,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "last_received": last_received,
                     "received_fields": metadata.get("received_fields", []),
                     "processed_fields": metadata.get("processed_fields", []),
+                    "connectivity_status": metadata.get("connectivity_status"),
                 }
                 if self.is_vehicle_awake(vin):
                     self._schedule_sleep_transition(vin)
