@@ -1457,6 +1457,7 @@ class TeslaTelemetryStatusSensor(TeslaVehicleCommandEntity, SensorEntity):
         last_received = metadata.get("last_received")
         return {
             "last_received": last_received.isoformat() if last_received else None,
+            "connectivity_status": metadata.get("connectivity_status"),
             "received_fields": metadata.get("received_fields", []),
             "processed_fields": metadata.get("processed_fields", []),
             "unprocessed_fields": sorted(

@@ -526,13 +526,13 @@ class TelemetryConsumer:
     ) -> None:
         """Process connectivity events."""
         # Connectivity events indicate vehicle online/offline/sleeping
-        status = data.get("status", "unknown")
+        status = str(data.get("status", "unknown"))
         response.setdefault("vehicle_state", {})
         response["vehicle_state"]["connectivity_status"] = status
-        
-        # If vehicle just came online, we might want to trigger a full refresh
-        if status == "online":
-            _LOGGER.info("Vehicle %s came online via telemetry", vin)
+        self.coordinator.set_connectivity_status(vin, status)
+
+        if status.upper() in {"CONNECTED", "ONLINE"}:
+            _LOGGER.info("Vehicle %s connected via telemetry", vin)
 
     def _apply_charging_composites(
         self,
