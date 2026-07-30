@@ -187,6 +187,7 @@ class TelemetryConsumer:
     ) -> tuple[set[str], set[str]]:
         """Process vehicle signal data from telemetry."""
         signals = self._decode_signals(data)
+        self.coordinator.record_telemetry_signal_values(vin, signals)
         _LOGGER.info(
             "Processing %d telemetry signals for vehicle %s", len(signals), vin
         )

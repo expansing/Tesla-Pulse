@@ -6,7 +6,7 @@ import asyncio
 import logging
 import ssl
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
@@ -273,6 +273,24 @@ _FLEET_TELEMETRY_FIELDS = {
 
 _TELEMETRY_STORE_VERSION = 2
 
+_OPTIONAL_CAPABILITY_GROUPS = {
+    "powertrain_rel_rer": {
+        "DiAxleSpeedREL", "DiAxleSpeedRER", "DiHeatsinkTREL", "DiHeatsinkTRER",
+        "DiInverterTREL", "DiInverterTRER", "DiMotorCurrentREL", "DiMotorCurrentRER",
+        "DiStateREL", "DiStateRER", "DiStatorTempREL", "DiStatorTempRER",
+        "DiTorqueActualREL", "DiTorqueActualRER", "DiVBatREL", "DiVBatRER",
+    },
+    "powershare": {
+        "PowershareHoursLeft", "PowershareInstantaneousPowerKW", "PowershareStatus",
+        "PowershareStopReason", "PowershareType",
+    },
+    "rear_display_hvac": {"RearDisplayHvacEnabled"},
+    "sunroof": {"SunroofInstalled"},
+    "tonneau": {"TonneauOpenPercent", "TonneauPosition", "TonneauTentMode"},
+}
+_OPTIONAL_CAPABILITY_ABSENCE_SESSIONS = 2
+_OPTIONAL_CAPABILITY_MINIMUM_FRAMES = 3
+
 
 class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Class to manage fetching Tesla vehicle data."""
@@ -297,6 +315,12 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._telemetry_receiver_available = False
         self._telemetry_metadata: dict[str, dict[str, Any]] = {}
         self._telemetry_raw_signals: dict[str, dict[str, Any]] = {}
+        self._capability_valid_signals: dict[str, set[str]] = {}
+        self._capability_frame_counts: dict[str, int] = {}
+        self._signal_capabilities: dict[str, dict[str, dict[str, Any]]] = {}
+        self._capability_listener: (
+            Callable[[str, set[str], set[str]], None] | None
+        ) = None
         self._telemetry_events = {
             vehicle["vin"]: asyncio.Event() for vehicle in self._vehicles
         }
@@ -326,6 +350,45 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Set whether the local Fleet Telemetry receiver is reachable."""
         self._telemetry_receiver_available = available
 
+    def set_capability_listener(
+        self, listener: Callable[[str, set[str], set[str]], None]
+    ) -> None:
+        """Set the callback used to apply optional entity capability decisions."""
+        self._capability_listener = listener
+
+    def record_telemetry_signal_values(
+        self, vin: str, signals: dict[str, Any]
+    ) -> None:
+        """Track optional raw signals received during the current awake session."""
+        valid = self._capability_valid_signals.setdefault(vin, set())
+        self._capability_frame_counts[vin] = self._capability_frame_counts.get(vin, 0) + 1
+        optional_signals = set().union(*_OPTIONAL_CAPABILITY_GROUPS.values())
+        for signal_name, value in signals.items():
+            if signal_name not in optional_signals:
+                continue
+            if value is not None:
+                valid.add(signal_name)
+
+        self._apply_reappeared_capabilities(vin, valid)
+
+    def _apply_reappeared_capabilities(
+        self, vin: str, valid_signals: set[str]
+    ) -> None:
+        """Re-enable entities whose previously absent signals become valid."""
+        capabilities = self._signal_capabilities.setdefault(vin, {})
+        reenabled: set[str] = set()
+        for group_name, signals in _OPTIONAL_CAPABILITY_GROUPS.items():
+            if not valid_signals.intersection(signals):
+                continue
+            capability = capabilities.setdefault(group_name, {})
+            if capability.get("auto_disabled"):
+                capability["auto_disabled"] = False
+                reenabled.add(group_name)
+            capability["absent_sessions"] = 0
+
+        if reenabled and self._capability_listener:
+            self._capability_listener(vin, set(), reenabled)
+
     def record_telemetry_update(
         self,
         vin: str,
@@ -353,6 +416,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if normalized_status == "DISCONNECTED":
             if timer := self._sleep_timers.pop(vin, None):
                 timer.cancel()
+            self._complete_capability_session(vin)
         elif normalized_status in {"CONNECTED", "ONLINE"}:
             self._schedule_sleep_transition(vin)
 
@@ -403,7 +467,38 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _handle_sleep_timeout(self, vin: str) -> None:
         """Publish the transition to asleep after telemetry inactivity."""
         self._sleep_timers.pop(vin, None)
+        self._complete_capability_session(vin)
         self.async_update_listeners()
+
+    def _complete_capability_session(self, vin: str) -> None:
+        """Evaluate optional signals after one complete awake telemetry session."""
+        valid = self._capability_valid_signals.pop(vin, set())
+        frame_count = self._capability_frame_counts.pop(vin, 0)
+        if frame_count < _OPTIONAL_CAPABILITY_MINIMUM_FRAMES:
+            return
+
+        capabilities = self._signal_capabilities.setdefault(vin, {})
+        disabled: set[str] = set()
+        for group_name, signals in _OPTIONAL_CAPABILITY_GROUPS.items():
+            capability = capabilities.setdefault(group_name, {})
+            if valid.intersection(signals):
+                capability["absent_sessions"] = 0
+                continue
+
+            capability["absent_sessions"] = (
+                int(capability.get("absent_sessions", 0)) + 1
+            )
+            if (
+                capability["absent_sessions"]
+                >= _OPTIONAL_CAPABILITY_ABSENCE_SESSIONS
+                and not capability.get("auto_disabled")
+            ):
+                capability["auto_disabled"] = True
+                disabled.add(group_name)
+
+        if disabled and self._capability_listener:
+            self._capability_listener(vin, disabled, set())
+        self._telemetry_store.async_delay_save(self._telemetry_store_payload, 30)
 
     def _prepare_telemetry_wait(self, vin: str) -> asyncio.Event:
         """Return a fresh event completed by the next telemetry vehicle frame."""
@@ -501,6 +596,13 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for vin, signals in raw_signals.items()
                 if vin in data and isinstance(signals, dict)
             }
+        capabilities = stored_cache.get("signal_capabilities", {})
+        if isinstance(capabilities, dict):
+            self._signal_capabilities = {
+                vin: groups
+                for vin, groups in capabilities.items()
+                if vin in data and isinstance(groups, dict)
+            }
         self.async_set_updated_data(data)
 
     def get_telemetry_raw_signals(self, vin: str) -> dict[str, Any]:
@@ -521,6 +623,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "vehicles": self.data if isinstance(self.data, dict) else {},
             "metadata": metadata,
             "raw_signals": self._telemetry_raw_signals,
+            "signal_capabilities": self._signal_capabilities,
         }
 
     def set_telemetry_data(

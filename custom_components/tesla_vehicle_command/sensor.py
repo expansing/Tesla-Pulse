@@ -51,6 +51,19 @@ _OPTIONAL_POWERTRAIN_SENSOR_KEYS = {
     "di_stator_temp_rer",
     "di_torque_actual_rel",
     "di_torque_actual_rer",
+    "di_vbat_rel",
+    "di_vbat_rer",
+}
+
+_OPTIONAL_CAPABILITY_ENTITY_KEYS = {
+    "powertrain_rel_rer": _OPTIONAL_POWERTRAIN_SENSOR_KEYS,
+    "powershare": {
+        "powershare_hours_left",
+        "powershare_instantaneous_power_kw",
+        "powershare_status",
+        "powershare_stop_reason",
+        "powershare_type",
+    },
 }
 
 
@@ -1399,6 +1412,47 @@ async def async_setup_entry(
     current_keys = {desc.key for desc in SENSOR_DESCRIPTIONS}
     current_keys.add("telemetry_status")  # TeslaTelemetryStatusSensor
     current_keys.add("vehicle_awake_status")
+
+    def apply_capability_changes(
+        vin: str, disabled_signals: set[str], reenabled_signals: set[str]
+    ) -> None:
+        """Apply optional telemetry capability decisions to registered entities."""
+        for group_name in disabled_signals:
+            sensor_keys = _OPTIONAL_CAPABILITY_ENTITY_KEYS.get(group_name, set())
+            for sensor_key in sensor_keys:
+                entity_id = entity_registry.async_get_entity_id(
+                    "sensor", DOMAIN, f"{vin}_{sensor_key}"
+                )
+                if entity_id and (
+                    entity_entry := entity_registry.async_get(entity_id)
+                ) and entity_entry.disabled_by is None:
+                    entity_registry.async_update_entity(
+                        entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
+                    )
+                    _LOGGER.info(
+                        "Disabled optional sensor %s after absent telemetry sessions",
+                        entity_id,
+                    )
+
+        for group_name in reenabled_signals:
+            sensor_keys = _OPTIONAL_CAPABILITY_ENTITY_KEYS.get(group_name, set())
+            for sensor_key in sensor_keys:
+                entity_id = entity_registry.async_get_entity_id(
+                    "sensor", DOMAIN, f"{vin}_{sensor_key}"
+                )
+                if not entity_id or not (
+                    entity_entry := entity_registry.async_get(entity_id)
+                ):
+                    continue
+                if entity_entry.disabled_by != er.RegistryEntryDisabler.INTEGRATION:
+                    continue
+                entity_registry.async_update_entity(entity_id, disabled_by=None)
+                _LOGGER.info(
+                    "Re-enabled optional sensor %s after valid telemetry",
+                    entity_id,
+                )
+
+    coordinator.set_capability_listener(apply_capability_changes)
 
     for vehicle in coordinator.vehicles:
         vin = vehicle["vin"]
