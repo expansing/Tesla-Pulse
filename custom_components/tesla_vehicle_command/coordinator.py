@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import ssl
 from datetime import datetime, timedelta
@@ -21,11 +22,14 @@ from .const import (
     COMMAND_BODIES,
     COMMANDS,
     CONF_TELEMETRY_HOSTNAME,
+    CONF_TELEMETRY_INACTIVITY_MINUTES,
     CONF_TELEMETRY_PORT,
     CONF_WAKE_BEFORE_COMMAND,
+    DEFAULT_TELEMETRY_INACTIVITY_MINUTES,
     DOMAIN,
     PROXY_HOST,
     PROXY_PORT,
+    WAKE_TELEMETRY_TIMEOUT_SECONDS,
 )
 from .proxy_manager import ProxyManager
 
@@ -293,6 +297,13 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._telemetry_receiver_available = False
         self._telemetry_metadata: dict[str, dict[str, Any]] = {}
         self._telemetry_raw_signals: dict[str, dict[str, Any]] = {}
+        self._telemetry_events = {
+            vehicle["vin"]: asyncio.Event() for vehicle in self._vehicles
+        }
+        self._command_locks = {
+            vehicle["vin"]: asyncio.Lock() for vehicle in self._vehicles
+        }
+        self._sleep_timers: dict[str, asyncio.TimerHandle] = {}
 
         super().__init__(
             hass,
@@ -327,6 +338,60 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "received_fields": sorted(received_fields),
             "processed_fields": sorted(processed_fields),
         }
+        self._telemetry_events.setdefault(vin, asyncio.Event()).set()
+        self._schedule_sleep_transition(vin)
+
+    @property
+    def telemetry_inactivity_timeout(self) -> timedelta:
+        """Return the configured interval after which a vehicle is asleep."""
+        minutes = self.entry.options.get(
+            CONF_TELEMETRY_INACTIVITY_MINUTES,
+            DEFAULT_TELEMETRY_INACTIVITY_MINUTES,
+        )
+        return timedelta(minutes=float(minutes))
+
+    def is_vehicle_awake(self, vin: str) -> bool:
+        """Return whether the vehicle sent telemetry within the active window."""
+        last_received = self._telemetry_metadata.get(vin, {}).get("last_received")
+        return bool(
+            isinstance(last_received, datetime)
+            and datetime.now().astimezone() - last_received
+            <= self.telemetry_inactivity_timeout
+        )
+
+    def _schedule_sleep_transition(self, vin: str) -> None:
+        """Notify entities when the telemetry inactivity window expires."""
+        if timer := self._sleep_timers.pop(vin, None):
+            timer.cancel()
+        last_received = self._telemetry_metadata.get(vin, {}).get("last_received")
+        if not isinstance(last_received, datetime):
+            return
+        elapsed = datetime.now().astimezone() - last_received
+        delay = (self.telemetry_inactivity_timeout - elapsed).total_seconds()
+        if delay <= 0:
+            return
+        self._sleep_timers[vin] = self.hass.loop.call_later(
+            delay,
+            self._handle_sleep_timeout,
+            vin,
+        )
+
+    def _handle_sleep_timeout(self, vin: str) -> None:
+        """Publish the transition to asleep after telemetry inactivity."""
+        self._sleep_timers.pop(vin, None)
+        self.async_update_listeners()
+
+    def _prepare_telemetry_wait(self, vin: str) -> asyncio.Event:
+        """Return a fresh event completed by the next telemetry vehicle frame."""
+        event = asyncio.Event()
+        self._telemetry_events[vin] = event
+        return event
+
+    def shutdown(self) -> None:
+        """Cancel coordinator timers."""
+        for timer in self._sleep_timers.values():
+            timer.cancel()
+        self._sleep_timers.clear()
 
     def get_telemetry_status(self, vin: str) -> dict[str, Any]:
         """Return telemetry health and diagnostic metadata for a vehicle."""
@@ -401,6 +466,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "received_fields": metadata.get("received_fields", []),
                     "processed_fields": metadata.get("processed_fields", []),
                 }
+                if self.is_vehicle_awake(vin):
+                    self._schedule_sleep_transition(vin)
 
         raw_signals = stored_cache.get("raw_signals", {})
         if isinstance(raw_signals, dict):
@@ -681,15 +748,38 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Send a command to the vehicle."""
+        lock = self._command_locks.setdefault(vin, asyncio.Lock())
+        async with lock:
+            return await self._async_send_command(vin, command, body)
+
+    async def _async_send_command(
+        self,
+        vin: str,
+        command: str,
+        body: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Wake if needed, wait for telemetry, then execute one command."""
         if not self.proxy_manager.is_running:
             raise RuntimeError("Proxy not running")
 
         if (
             command != "wake_up"
             and self.entry.options.get(CONF_WAKE_BEFORE_COMMAND, False)
+            and not self.is_vehicle_awake(vin)
         ):
-            _LOGGER.debug("Waking vehicle %s before command %s", vin, command)
+            telemetry_event = self._prepare_telemetry_wait(vin)
+            _LOGGER.info("Waking sleeping vehicle %s before command %s", vin, command)
             await self.async_wake_up(vin)
+            try:
+                await asyncio.wait_for(
+                    telemetry_event.wait(),
+                    timeout=WAKE_TELEMETRY_TIMEOUT_SECONDS,
+                )
+            except TimeoutError as err:
+                raise RuntimeError(
+                    f"Vehicle {vin} did not send telemetry within "
+                    f"{WAKE_TELEMETRY_TIMEOUT_SECONDS} seconds after wake-up"
+                ) from err
 
         await self._ensure_valid_token()
 

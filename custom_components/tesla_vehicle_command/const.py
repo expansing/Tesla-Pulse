@@ -26,9 +26,15 @@ CONF_VIN = "vin"
 CONF_NAME = "name"
 CONF_PRIVATE_KEY_PATH = "private_key_path"
 CONF_TELEMETRY_HOSTNAME = "telemetry_hostname"
+CONF_TELEMETRY_INACTIVITY_MINUTES = "telemetry_inactivity_minutes"
 CONF_TELEMETRY_PORT = "telemetry_port"
 CONF_WAKE_BEFORE_COMMAND = "wake_before_command"
 CONF_WAKE_ON_STARTUP = "wake_on_startup"
+
+DEFAULT_TELEMETRY_INACTIVITY_MINUTES = 15
+MAX_TELEMETRY_INACTIVITY_MINUTES = 120
+MIN_TELEMETRY_INACTIVITY_MINUTES = 1
+WAKE_TELEMETRY_TIMEOUT_SECONDS = 90
 
 # OAuth2
 OAUTH2_AUTHORIZE = "https://auth.tesla.com/oauth2/v3/authorize"

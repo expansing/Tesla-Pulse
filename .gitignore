@@ -5,5 +5,7 @@ __pycache__/
 coverage.xml
 IMPROVEMENT_PLAN.md
 TESLA_FLEET_PARTNER_SETUP.md
-.github/
+.github/*
+!.github/workflows/
+!.github/workflows/*.yml
 .vscode
