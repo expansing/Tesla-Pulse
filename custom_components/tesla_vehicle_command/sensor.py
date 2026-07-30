@@ -30,7 +30,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DOMAIN, OPT_OPTIONAL_POWERTRAIN_SENSORS_MIGRATED
 from .coordinator import TeslaVehicleCommandCoordinator
 from .entity import TeslaVehicleCommandEntity
 
@@ -1409,6 +1409,38 @@ async def async_setup_entry(
                 if sensor_key not in current_keys:
                     _LOGGER.info("Removing orphaned sensor entity: %s", entity_entry.entity_id)
                     entity_registry.async_remove(entity_entry.entity_id)
+
+    if not entry.options.get(OPT_OPTIONAL_POWERTRAIN_SENSORS_MIGRATED, False):
+        disabled_count = 0
+        for entity_entry in er.async_entries_for_config_entry(entity_registry, entry.entry_id):
+            unique_id = entity_entry.unique_id
+            if not unique_id:
+                continue
+            for vehicle in coordinator.vehicles:
+                vin = vehicle["vin"]
+                prefix = f"{vin}_"
+                if not unique_id.startswith(prefix):
+                    continue
+                sensor_key = unique_id[len(prefix) :]
+                if (
+                    sensor_key in _OPTIONAL_POWERTRAIN_SENSOR_KEYS
+                    and entity_entry.disabled_by is None
+                ):
+                    entity_registry.async_update_entity(
+                        entity_entry.entity_id,
+                        disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+                    )
+                    disabled_count += 1
+                break
+
+        entry_options = dict(entry.options)
+        entry_options[OPT_OPTIONAL_POWERTRAIN_SENSORS_MIGRATED] = True
+        hass.config_entries.async_update_entry(entry, options=entry_options)
+        if disabled_count:
+            _LOGGER.info(
+                "Disabled %d optional powertrain diagnostic sensors by default",
+                disabled_count,
+            )
 
     entities = []
     for vehicle in coordinator.vehicles:
