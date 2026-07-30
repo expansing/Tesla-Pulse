@@ -5,6 +5,7 @@ from __future__ import annotations
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
@@ -26,11 +27,6 @@ BUTTON_DESCRIPTIONS = [
         key="flash_lights",
         name="Flash Lights",
         icon="mdi:car-light-high",
-    ),
-    ButtonEntityDescription(
-        key="fart",
-        name="Fart",
-        icon="mdi:emoticon-poop",
     ),
     ButtonEntityDescription(
         key="open_charge_port",
@@ -82,6 +78,20 @@ async def async_setup_entry(
 ) -> None:
     """Set up button entities."""
     coordinator: TeslaVehicleCommandCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    entity_registry = er.async_get(hass)
+    current_keys = {description.key for description in BUTTON_DESCRIPTIONS}
+
+    for entity_entry in er.async_entries_for_config_entry(entity_registry, entry.entry_id):
+        if entity_entry.domain != "button":
+            continue
+        unique_id = entity_entry.unique_id
+        if not unique_id:
+            continue
+        for vehicle in coordinator.vehicles:
+            prefix = f"{vehicle['vin']}_"
+            if unique_id.startswith(prefix) and unique_id[len(prefix) :] not in current_keys:
+                entity_registry.async_remove(entity_entry.entity_id)
+                break
 
     entities = []
     for vehicle in coordinator.vehicles:
@@ -124,7 +134,6 @@ class TeslaButtonEntity(TeslaVehicleCommandEntity, ButtonEntity):
             "wake_up": ("wake_up", {}),
             "honk_horn": ("honk", {}),
             "flash_lights": ("flash", {}),
-            "fart": ("fart", {}),
             "open_charge_port": ("charge_port_open", {}),
             "close_charge_port": ("charge_port_close", {}),
             "open_trunk": ("trunk_rear", {}),
