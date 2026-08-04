@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import ssl
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -675,8 +676,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if raw_signals is not None:
             self._telemetry_raw_signals[vin] = dict(raw_signals)
 
-        # Process Fleet API door composites without recalculating telemetry-owned
-        # brick diagnostics.
+        # Apply the score and door composites without deriving telemetry-owned
+        # brick imbalance from independently received extrema.
         processed_response = self._process_vehicle_response(response)
 
         updated_data = dict(self.data or self._empty_telemetry_data())
@@ -691,11 +692,77 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Create a copy to avoid modifying the original
         processed = dict(response)
         
+        self._apply_charging_composites(processed, {}, set(), set())
+
         # Apply door state expansion for Fleet API responses
         # Fleet API may return composite DoorState that needs expansion
         self._apply_door_state(processed, {}, set())
         
         return processed
+
+    def _apply_charging_composites(
+        self,
+        response: dict[str, Any],
+        last_signals: dict[str, Any],
+        received_fields: set[str],
+        processed_fields: set[str],
+    ) -> None:
+        """Update score from an existing valid brick imbalance and current SOC."""
+        del last_signals, received_fields, processed_fields
+        charge_state = response.setdefault("charge_state", {})
+        imbalance = charge_state.get("brick_voltage_imbalance")
+        soc = charge_state.get("battery_level")
+        if not self._is_valid_soc(soc):
+            soc = charge_state.get("usable_battery_level")
+        if (
+            not self._is_finite_number(imbalance)
+            or imbalance < 0
+            or not self._is_valid_soc(soc)
+        ):
+            return
+
+        if soc >= 90:
+            if imbalance <= 10:
+                score = 100
+            elif imbalance <= 20:
+                score = 85
+            elif imbalance <= 30:
+                score = 70
+            else:
+                score = 55
+        elif soc >= 50:
+            if imbalance <= 20:
+                score = 100
+            elif imbalance <= 30:
+                score = 85
+            elif imbalance <= 50:
+                score = 70
+            else:
+                score = 55
+        else:
+            if imbalance <= 40:
+                score = 100
+            elif imbalance <= 80:
+                score = 85
+            elif imbalance <= 120:
+                score = 70
+            else:
+                score = 55
+        charge_state["battery_balance_score"] = score
+
+    @staticmethod
+    def _is_finite_number(value: Any) -> bool:
+        """Return whether a value is a finite non-boolean number."""
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        )
+
+    @classmethod
+    def _is_valid_soc(cls, value: Any) -> bool:
+        """Return whether a value is a valid state of charge percentage."""
+        return cls._is_finite_number(value) and 0 <= value <= 100
 
     def _apply_door_state(
         self,

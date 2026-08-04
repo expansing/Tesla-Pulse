@@ -468,10 +468,11 @@ The integration provides battery health diagnostics derived from Fleet Telemetry
 
 > **Note:** These sensors require **Fleet Telemetry** to be configured and running. The `BrickVoltageMax` and `BrickVoltageMin` fields are only available via telemetry signals, not from the Fleet API `vehicle_data` endpoint. They will show as unavailable until telemetry data is received.
 
-Tesla Pulse publishes **Brick Voltage Imbalance** only when `BrickVoltageMax`
-and `BrickVoltageMin` arrive in the same decoded telemetry record. It does not
-combine extrema from separate records; the last valid brick maximum, minimum,
-and imbalance remain visible until a new valid same-record pair replaces them.
+Tesla Pulse updates brick diagnostics only when `BrickVoltageMax`,
+`BrickVoltageMin`, `NumBrickVoltageMax`, and `NumBrickVoltageMin` arrive in the
+same decoded telemetry record. It does not combine fields from separate
+records; the last valid brick maximum, minimum, indices, and imbalance remain
+visible until a new complete snapshot replaces them.
 
 ### Battery Balance Score
 

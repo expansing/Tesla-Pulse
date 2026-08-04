@@ -209,8 +209,8 @@ class TelemetryConsumer:
         signal_mapping = {
             # Battery/Charging
             "Soc": (
-                ("charge_state", "usable_battery_level", self._to_int),
-                ("charge_state", "battery_level", self._to_int),
+                ("charge_state", "usable_battery_level", self._to_soc),
+                ("charge_state", "battery_level", self._to_soc),
             ),
             "RatedRange": (("charge_state", "battery_range", self._to_float),),
             "EstBatteryRange": (("charge_state", "est_battery_range", self._to_float),),
@@ -577,88 +577,33 @@ class TelemetryConsumer:
             if not isinstance(brick_min, (int, float)):
                 last_signals.pop(_BRICK_VOLTAGE_MIN_SIGNAL, None)
 
-        has_extrema_pair = {
+        has_brick_snapshot = {
             _BRICK_VOLTAGE_MAX_SIGNAL,
             _BRICK_VOLTAGE_MIN_SIGNAL,
+            _BRICK_VOLTAGE_MAX_INDEX_SIGNAL,
+            _BRICK_VOLTAGE_MIN_INDEX_SIGNAL,
         }.issubset(received_fields)
+        brick_max_index = self._to_int(signals.get(_BRICK_VOLTAGE_MAX_INDEX_SIGNAL))
+        brick_min_index = self._to_int(signals.get(_BRICK_VOLTAGE_MIN_INDEX_SIGNAL))
         pair_imbalance: float | None = None
         if (
-            has_extrema_pair
+            has_brick_snapshot
             and isinstance(brick_max, (int, float))
             and isinstance(brick_min, (int, float))
             and brick_max >= brick_min
+            and brick_max_index is not None
+            and brick_min_index is not None
         ):
             candidate_imbalance = brick_max - brick_min
             if math.isfinite(candidate_imbalance):
                 pair_imbalance = candidate_imbalance
 
-        for voltage_signal, index_signal, state_key in (
-            (
-                _BRICK_VOLTAGE_MAX_SIGNAL,
-                _BRICK_VOLTAGE_MAX_INDEX_SIGNAL,
-                "num_brick_voltage_max",
-            ),
-            (
-                _BRICK_VOLTAGE_MIN_SIGNAL,
-                _BRICK_VOLTAGE_MIN_INDEX_SIGNAL,
-                "num_brick_voltage_min",
-            ),
-        ):
-            if {voltage_signal, index_signal}.issubset(received_fields):
-                index = self._to_int(signals.get(index_signal))
-                if index is not None:
-                    charge_state[state_key] = index
-
-        # Calculate the score from the last valid same-record imbalance and the
-        # most recent valid SOC. This does not derive a new imbalance.
-        # Based on imbalance thresholds that vary by SOC:
-        # SOC >= 90%: <=10mV=Excellent(100%), <=20mV=Good(85%), <=30mV=Watch(70%), >30mV=Warning(55%)
-        # SOC >= 50%: <=20mV=Excellent(100%), <=30mV=Good(85%), <=50mV=Watch(70%), >50mV=Warning(55%)
-        # SOC < 50%:  <=40mV=Excellent(100%), <=80mV=Good(85%), <=120mV=Watch(70%), >120mV=Warning(55%)
-        soc = charge_state.get("battery_level")
-        if not self._is_finite_number(soc):
-            soc = charge_state.get("usable_battery_level")
         if isinstance(pair_imbalance, (int, float)):
             charge_state["brick_voltage_max"] = brick_max
             charge_state["brick_voltage_min"] = brick_min
             charge_state["brick_voltage_imbalance"] = pair_imbalance
-
-        imbalance = charge_state.get("brick_voltage_imbalance")
-        if (
-            self._is_finite_number(imbalance)
-            and self._is_finite_number(soc)
-        ):
-            if soc >= 90:
-                # Near full charge - tightest thresholds
-                if imbalance <= 10:
-                    score = 100
-                elif imbalance <= 20:
-                    score = 85
-                elif imbalance <= 30:
-                    score = 70
-                else:
-                    score = 55
-            elif soc >= 50:
-                # Mid-range SOC
-                if imbalance <= 20:
-                    score = 100
-                elif imbalance <= 30:
-                    score = 85
-                elif imbalance <= 50:
-                    score = 70
-                else:
-                    score = 55
-            else:
-                # Low SOC - wider thresholds
-                if imbalance <= 40:
-                    score = 100
-                elif imbalance <= 80:
-                    score = 85
-                elif imbalance <= 120:
-                    score = 70
-                else:
-                    score = 55
-            charge_state["battery_balance_score"] = score
+            charge_state["num_brick_voltage_max"] = brick_max_index
+            charge_state["num_brick_voltage_min"] = brick_min_index
 
     @classmethod
     def _apply_door_state(
@@ -696,6 +641,19 @@ class TelemetryConsumer:
         except (TypeError, ValueError, OverflowError):
             return None
         if not math.isfinite(numeric_value):
+            return None
+        return int(round(numeric_value))
+
+    @classmethod
+    def _to_soc(cls, value: Any) -> int | None:
+        """Convert a telemetry state of charge only when it is in range."""
+        if isinstance(value, bool):
+            return None
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(numeric_value) or not 0 <= numeric_value <= 100:
             return None
         return int(round(numeric_value))
 
