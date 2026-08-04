@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import ssl
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -420,9 +421,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         metadata["connectivity_status"] = normalized_status
 
         if normalized_status == "DISCONNECTED":
-            if timer := self._sleep_timers.pop(vin, None):
-                timer.cancel()
-            self._complete_capability_session(vin)
+            self._schedule_sleep_transition(vin)
         elif normalized_status in {"CONNECTED", "ONLINE"}:
             self._schedule_sleep_transition(vin)
 
@@ -440,10 +439,6 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def is_vehicle_awake(self, vin: str) -> bool:
         """Return whether the vehicle has sent telemetry recently."""
         metadata = self._telemetry_metadata.get(vin, {})
-        connectivity_status = metadata.get("connectivity_status")
-        if connectivity_status == "DISCONNECTED":
-            return False
-
         last_received = metadata.get("last_received")
         return bool(
             isinstance(last_received, datetime)
@@ -485,6 +480,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         elapsed = datetime.now().astimezone() - last_received
         delay = (self.telemetry_inactivity_timeout - elapsed).total_seconds()
         if delay <= 0:
+            self._handle_sleep_timeout(vin)
             return
         self._sleep_timers[vin] = self.hass.loop.call_later(
             delay,
@@ -680,7 +676,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if raw_signals is not None:
             self._telemetry_raw_signals[vin] = dict(raw_signals)
 
-        # Process the response to compute derived fields (imbalance, balance score, door states)
+        # Apply the score and door composites without deriving telemetry-owned
+        # brick imbalance from independently received extrema.
         processed_response = self._process_vehicle_response(response)
 
         updated_data = dict(self.data or self._empty_telemetry_data())
@@ -695,14 +692,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Create a copy to avoid modifying the original
         processed = dict(response)
         
-        # Apply charging composites (imbalance, balance score)
-        self._apply_charging_composites(
-            processed,
-            {},  # last_signals not available for Fleet API response
-            set(),  # received_fields
-            set(),  # processed_fields
-        )
-        
+        self._apply_charging_composites(processed, {}, set(), set())
+
         # Apply door state expansion for Fleet API responses
         # Fleet API may return composite DoorState that needs expansion
         self._apply_door_state(processed, {}, set())
@@ -716,48 +707,62 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         received_fields: set[str],
         processed_fields: set[str],
     ) -> None:
-        """Derive charge values and compute battery health metrics."""
+        """Update score from an existing valid brick imbalance and current SOC."""
+        del last_signals, received_fields, processed_fields
         charge_state = response.setdefault("charge_state", {})
-
-        # Calculate battery balance score (0-100%) - SOC-aware
-        # Based on imbalance thresholds that vary by SOC:
-        # SOC >= 90%: <=10mV=Excellent(100%), <=20mV=Good(85%), <=30mV=Watch(70%), >30mV=Warning(55%)
-        # SOC >= 50%: <=20mV=Excellent(100%), <=30mV=Good(85%), <=50mV=Watch(70%), >50mV=Warning(55%)
-        # SOC < 50%:  <=40mV=Excellent(100%), <=80mV=Good(85%), <=120mV=Watch(70%), >120mV=Warning(55%)
         imbalance = charge_state.get("brick_voltage_imbalance")
-        soc = charge_state.get("battery_level") or charge_state.get("usable_battery_level")
-        if isinstance(imbalance, (int, float)) and isinstance(soc, (int, float)):
-            if soc >= 90:
-                # Near full charge - tightest thresholds
-                if imbalance <= 10:
-                    score = 100
-                elif imbalance <= 20:
-                    score = 85
-                elif imbalance <= 30:
-                    score = 70
-                else:
-                    score = 55
-            elif soc >= 50:
-                # Mid-range SOC
-                if imbalance <= 20:
-                    score = 100
-                elif imbalance <= 30:
-                    score = 85
-                elif imbalance <= 50:
-                    score = 70
-                else:
-                    score = 55
+        soc = charge_state.get("battery_level")
+        if not self._is_valid_soc(soc):
+            soc = charge_state.get("usable_battery_level")
+        if (
+            not self._is_finite_number(imbalance)
+            or imbalance < 0
+            or not self._is_valid_soc(soc)
+        ):
+            return
+
+        if soc >= 90:
+            if imbalance <= 10:
+                score = 100
+            elif imbalance <= 20:
+                score = 85
+            elif imbalance <= 30:
+                score = 70
             else:
-                # Low SOC - wider thresholds
-                if imbalance <= 40:
-                    score = 100
-                elif imbalance <= 80:
-                    score = 85
-                elif imbalance <= 120:
-                    score = 70
-                else:
-                    score = 55
-            charge_state["battery_balance_score"] = score
+                score = 55
+        elif soc >= 50:
+            if imbalance <= 20:
+                score = 100
+            elif imbalance <= 30:
+                score = 85
+            elif imbalance <= 50:
+                score = 70
+            else:
+                score = 55
+        else:
+            if imbalance <= 40:
+                score = 100
+            elif imbalance <= 80:
+                score = 85
+            elif imbalance <= 120:
+                score = 70
+            else:
+                score = 55
+        charge_state["battery_balance_score"] = score
+
+    @staticmethod
+    def _is_finite_number(value: Any) -> bool:
+        """Return whether a value is a finite non-boolean number."""
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        )
+
+    @classmethod
+    def _is_valid_soc(cls, value: Any) -> bool:
+        """Return whether a value is a valid state of charge percentage."""
+        return cls._is_finite_number(value) and 0 <= value <= 100
 
     def _apply_door_state(
         self,
@@ -920,7 +925,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self.proxy_manager.is_running:
             raise RuntimeError("Proxy not running")
 
-        if command != "wake_up":
+        if command != "wake_up" and not self.is_vehicle_awake(vin):
             self._require_telemetry_receiver()
             telemetry_generation, telemetry_event = self._prepare_telemetry_wait(vin)
             _LOGGER.info("Waking vehicle %s before command %s", vin, command)

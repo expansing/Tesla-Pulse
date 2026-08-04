@@ -370,8 +370,10 @@ When enabled, Tesla Pulse restores the cache first, then wakes every configured 
 
 Tesla Pulse also exposes a **Vehicle Awake Status** diagnostic sensor. A vehicle is `Awake` while Fleet Telemetry frames are arriving and becomes `Asleep` after the configured **Minutes without telemetry before vehicle is asleep** interval.
 
-Tesla Pulse requires Fleet Telemetry to be running before it sends vehicle
-commands. Before every non-wake command, it follows this sequence:
+Tesla Pulse requires Fleet Telemetry to wake and confirm a sleeping vehicle
+before sending a command. A command is sent directly when the vehicle has sent
+a recent vehicle telemetry frame, even if a later `DISCONNECTED` connectivity
+record reports a lost Wi-Fi or LTE link. Otherwise, it follows this sequence:
 
 1. Tesla Pulse records the current telemetry generation and sends a wake-up request.
 2. It waits for the next vehicle telemetry frame, confirming that the vehicle is awake.
@@ -466,6 +468,12 @@ The integration provides battery health diagnostics derived from Fleet Telemetry
 
 > **Note:** These sensors require **Fleet Telemetry** to be configured and running. The `BrickVoltageMax` and `BrickVoltageMin` fields are only available via telemetry signals, not from the Fleet API `vehicle_data` endpoint. They will show as unavailable until telemetry data is received.
 
+Tesla Pulse updates brick diagnostics only when `BrickVoltageMax`,
+`BrickVoltageMin`, `NumBrickVoltageMax`, and `NumBrickVoltageMin` arrive in the
+same decoded telemetry record. It does not combine fields from separate
+records; the last valid brick maximum, minimum, indices, and imbalance remain
+visible until a new complete snapshot replaces them.
+
 ### Battery Balance Score
 
 The **Battery Balance Score** adjusts its thresholds based on State of Charge (SOC), since cell imbalance naturally varies across the discharge curve:
@@ -476,7 +484,7 @@ The **Battery Balance Score** adjusts its thresholds based on State of Charge (S
 | **50–89%** | ≤ 20 mV | ≤ 30 mV | ≤ 50 mV | > 50 mV |
 | **< 50%** | ≤ 40 mV | ≤ 80 mV | ≤ 120 mV | > 120 mV |
 
-This avoids false alarms at low SOC where the voltage curve steepens and small capacity differences produce larger voltage spreads. The score is computed from `BrickVoltageMax` and `BrickVoltageMin` telemetry fields and updates whenever new telemetry arrives.
+This avoids false alarms at low SOC where the voltage curve steepens and small capacity differences produce larger voltage spreads. The score uses the last valid same-record imbalance and the most recent valid SOC.
 
 All four sensors are categorized as **Diagnostic** and appear under the vehicle device in **Settings > Devices & services**.
 
