@@ -460,7 +460,6 @@ SENSOR_DESCRIPTIONS = [
         native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
         value_path="charge_state.brick_voltage_imbalance",
         icon="mdi:flash-alert",
-        default_value=0,
     ),
     TeslaSensorEntityDescription(
         key="battery_balance_score",

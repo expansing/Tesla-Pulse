@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from typing import Any
 
 import zmq
@@ -563,36 +564,31 @@ class TelemetryConsumer:
             {"ACChargingEnergyIn", "DCChargingEnergyIn"} & received_fields
         )
 
-        # Fleet Telemetry can emit each brick signal in a separate record. The
-        # decoded payload has no correlation ID, so only fields in this record
-        # can be used together to derive an imbalance or brick association.
+        # A decoded record has no per-signal correlation ID. Update extrema and
+        # imbalance only when both extrema occur in that same record.
         brick_max: float | None = None
         brick_min: float | None = None
         if _BRICK_VOLTAGE_MAX_SIGNAL in received_fields:
             brick_max = self._to_millivolts(signals.get(_BRICK_VOLTAGE_MAX_SIGNAL))
-            if isinstance(brick_max, (int, float)):
-                charge_state["brick_voltage_max"] = brick_max
+            if not isinstance(brick_max, (int, float)):
+                last_signals.pop(_BRICK_VOLTAGE_MAX_SIGNAL, None)
         if _BRICK_VOLTAGE_MIN_SIGNAL in received_fields:
             brick_min = self._to_millivolts(signals.get(_BRICK_VOLTAGE_MIN_SIGNAL))
-            if isinstance(brick_min, (int, float)):
-                charge_state["brick_voltage_min"] = brick_min
+            if not isinstance(brick_min, (int, float)):
+                last_signals.pop(_BRICK_VOLTAGE_MIN_SIGNAL, None)
 
         has_extrema_pair = {
             _BRICK_VOLTAGE_MAX_SIGNAL,
             _BRICK_VOLTAGE_MIN_SIGNAL,
         }.issubset(received_fields)
+        pair_imbalance: float | None = None
         if (
             has_extrema_pair
             and isinstance(brick_max, (int, float))
             and isinstance(brick_min, (int, float))
+            and brick_max >= brick_min
         ):
-            charge_state["brick_voltage_imbalance"] = brick_max - brick_min
-        elif {
-            _BRICK_VOLTAGE_MAX_SIGNAL,
-            _BRICK_VOLTAGE_MIN_SIGNAL,
-        } & received_fields:
-            charge_state.pop("brick_voltage_imbalance", None)
-            charge_state.pop("battery_balance_score", None)
+            pair_imbalance = brick_max - brick_min
 
         for voltage_signal, index_signal, state_key in (
             (
@@ -618,40 +614,53 @@ class TelemetryConsumer:
         # SOC >= 90%: <=10mV=Excellent(100%), <=20mV=Good(85%), <=30mV=Watch(70%), >30mV=Warning(55%)
         # SOC >= 50%: <=20mV=Excellent(100%), <=30mV=Good(85%), <=50mV=Watch(70%), >50mV=Warning(55%)
         # SOC < 50%:  <=40mV=Excellent(100%), <=80mV=Good(85%), <=120mV=Watch(70%), >120mV=Warning(55%)
-        imbalance = charge_state.get("brick_voltage_imbalance")
-        soc = charge_state.get("battery_level") or charge_state.get("usable_battery_level")
-        if isinstance(imbalance, (int, float)) and isinstance(soc, (int, float)):
+        soc = charge_state.get("battery_level")
+        if not isinstance(soc, (int, float)):
+            soc = charge_state.get("usable_battery_level")
+        if isinstance(pair_imbalance, (int, float)):
+            charge_state["brick_voltage_max"] = brick_max
+            charge_state["brick_voltage_min"] = brick_min
+            charge_state["brick_voltage_imbalance"] = pair_imbalance
+
+        if (
+            isinstance(pair_imbalance, (int, float))
+            and isinstance(soc, (int, float))
+            and not isinstance(soc, bool)
+            and math.isfinite(soc)
+        ):
             if soc >= 90:
                 # Near full charge - tightest thresholds
-                if imbalance <= 10:
+                if pair_imbalance <= 10:
                     score = 100
-                elif imbalance <= 20:
+                elif pair_imbalance <= 20:
                     score = 85
-                elif imbalance <= 30:
+                elif pair_imbalance <= 30:
                     score = 70
                 else:
                     score = 55
             elif soc >= 50:
                 # Mid-range SOC
-                if imbalance <= 20:
+                if pair_imbalance <= 20:
                     score = 100
-                elif imbalance <= 30:
+                elif pair_imbalance <= 30:
                     score = 85
-                elif imbalance <= 50:
+                elif pair_imbalance <= 50:
                     score = 70
                 else:
                     score = 55
             else:
                 # Low SOC - wider thresholds
-                if imbalance <= 40:
+                if pair_imbalance <= 40:
                     score = 100
-                elif imbalance <= 80:
+                elif pair_imbalance <= 80:
                     score = 85
-                elif imbalance <= 120:
+                elif pair_imbalance <= 120:
                     score = 70
                 else:
                     score = 55
             charge_state["battery_balance_score"] = score
+        elif isinstance(pair_imbalance, (int, float)):
+            charge_state.pop("battery_balance_score", None)
 
     @classmethod
     def _apply_door_state(
@@ -682,10 +691,15 @@ class TelemetryConsumer:
     @staticmethod
     def _to_int(value: Any) -> int | None:
         """Convert telemetry numeric values to Fleet API integer fields."""
-        try:
-            return int(round(float(value)))
-        except (TypeError, ValueError):
+        if isinstance(value, bool):
             return None
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(numeric_value):
+            return None
+        return int(round(numeric_value))
 
     @staticmethod
     def _to_float(value: Any) -> float | None:
@@ -721,11 +735,14 @@ class TelemetryConsumer:
     @staticmethod
     def _to_millivolts(value: Any) -> float | None:
         """Convert telemetry voltage values from volts to millivolts."""
+        if isinstance(value, bool):
+            return None
         try:
             volts = float(value)
-            return volts * 1000
         except (TypeError, ValueError):
             return None
+        millivolts = volts * 1000
+        return millivolts if math.isfinite(millivolts) else None
 
     @staticmethod
     def _enum_tail(value: Any) -> str:
