@@ -51,6 +51,6 @@ class TeslaVehicleControlEntity(TeslaVehicleCommandEntity):
     @property
     def available(self) -> bool:
         """Return whether this control can send a new command."""
-        return super().available and not self.coordinator.is_command_in_progress(
+        return super().available and not self.coordinator.is_vehicle_waking(
             self.vin
         )

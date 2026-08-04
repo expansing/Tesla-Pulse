@@ -331,6 +331,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             vehicle["vin"]: asyncio.Lock() for vehicle in self._vehicles
         }
         self._commands_in_progress: set[str] = set()
+        self._vehicles_waking: set[str] = set()
         self._sleep_timers: dict[str, asyncio.TimerHandle] = {}
 
         super().__init__(
@@ -450,6 +451,18 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return whether a vehicle is waking or executing a command."""
         return vin in self._commands_in_progress
 
+    def is_vehicle_waking(self, vin: str) -> bool:
+        """Return whether a vehicle is being woken for a command."""
+        return vin in self._vehicles_waking
+
+    def _set_vehicle_waking(self, vin: str, waking: bool) -> None:
+        """Publish a vehicle's command-readiness phase."""
+        if waking:
+            self._vehicles_waking.add(vin)
+        else:
+            self._vehicles_waking.discard(vin)
+        self.async_update_listeners()
+
     def _require_telemetry_receiver(self) -> None:
         """Require telemetry before using it as command readiness evidence."""
         if not self._telemetry_receiver_available:
@@ -541,6 +554,28 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._telemetry_generations.get(vin, 0) > generation:
             return
         await asyncio.wait_for(event.wait(), timeout=WAKE_TELEMETRY_TIMEOUT_SECONDS)
+
+    @staticmethod
+    def _wake_response_is_online(response: Any) -> bool:
+        """Return whether Tesla's wake response confirms the vehicle is online."""
+        if not isinstance(response, dict):
+            return False
+        payload = response.get("response", response)
+        return (
+            isinstance(payload, dict)
+            and str(payload.get("state", "")).strip().lower() == "online"
+        )
+
+    @staticmethod
+    def _validate_command_response(response: Any) -> dict[str, Any]:
+        """Reject command responses that Tesla reports as unsuccessful."""
+        if not isinstance(response, dict):
+            raise RuntimeError("Command returned an invalid response")
+        payload = response.get("response")
+        if isinstance(payload, dict) and payload.get("result") is False:
+            reason = payload.get("reason") or "Tesla rejected the command"
+            raise RuntimeError(f"Command failed: {reason}")
+        return response
 
     def shutdown(self) -> None:
         """Cancel coordinator timers."""
@@ -686,6 +721,20 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._telemetry_store.async_delay_save(
             self._telemetry_store_payload, 30
         )
+
+    def set_vehicle_state_after_command(
+        self, vin: str, key: str, value: Any
+    ) -> None:
+        """Publish an optimistic state that subsequent telemetry can correct."""
+        updated_data = dict(self.data or self._empty_telemetry_data())
+        vehicle_data = dict(updated_data.get(vin, {}))
+        response = dict(vehicle_data.get("response", {}))
+        vehicle_state = dict(response.get("vehicle_state", {}))
+        vehicle_state[key] = value
+        response["vehicle_state"] = vehicle_state
+        vehicle_data["response"] = response
+        updated_data[vin] = vehicle_data
+        self.async_set_updated_data(updated_data)
 
     def _process_vehicle_response(self, response: dict[str, Any]) -> dict[str, Any]:
         """Process vehicle response to compute derived fields."""
@@ -926,19 +975,24 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise RuntimeError("Proxy not running")
 
         if command != "wake_up" and not self.is_vehicle_awake(vin):
-            self._require_telemetry_receiver()
             telemetry_generation, telemetry_event = self._prepare_telemetry_wait(vin)
             _LOGGER.info("Waking vehicle %s before command %s", vin, command)
-            await self._async_wake_up(vin)
             try:
-                await self._async_wait_for_telemetry_after(
-                    vin, telemetry_generation, telemetry_event
-                )
-            except TimeoutError as err:
-                raise RuntimeError(
-                    f"Vehicle {vin} did not send telemetry within "
-                    f"{WAKE_TELEMETRY_TIMEOUT_SECONDS} seconds after wake-up"
-                ) from err
+                self._set_vehicle_waking(vin, True)
+                wake_response = await self._async_wake_up(vin)
+                if not self._wake_response_is_online(wake_response):
+                    self._require_telemetry_receiver()
+                    try:
+                        await self._async_wait_for_telemetry_after(
+                            vin, telemetry_generation, telemetry_event
+                        )
+                    except TimeoutError as err:
+                        raise RuntimeError(
+                            f"Vehicle {vin} did not become ready within "
+                            f"{WAKE_TELEMETRY_TIMEOUT_SECONDS} seconds after wake-up"
+                        ) from err
+            finally:
+                self._set_vehicle_waking(vin, False)
 
         await self._ensure_valid_token()
 
@@ -976,31 +1030,36 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if retry_resp.status != 200:
                         text = await retry_resp.text()
                         raise RuntimeError(f"Command failed: {retry_resp.status} - {text}")
-                    return await retry_resp.json()
+                    return self._validate_command_response(await retry_resp.json())
 
             if resp.status != 200:
                 text = await resp.text()
                 raise RuntimeError(f"Command failed: {resp.status} - {text}")
 
-            return await resp.json()
+            return self._validate_command_response(await resp.json())
 
     async def async_wake_up(self, vin: str) -> dict[str, Any]:
-        """Wake a vehicle and wait for its first subsequent telemetry frame."""
+        """Wake a vehicle and wait until API or telemetry confirms readiness."""
         self._acquire_command_slot(vin)
         try:
-            self._require_telemetry_receiver()
             telemetry_generation, telemetry_event = self._prepare_telemetry_wait(vin)
-            response = await self._async_wake_up(vin)
             try:
-                await self._async_wait_for_telemetry_after(
-                    vin, telemetry_generation, telemetry_event
-                )
-            except TimeoutError as err:
-                raise RuntimeError(
-                    f"Vehicle {vin} did not send telemetry within "
-                    f"{WAKE_TELEMETRY_TIMEOUT_SECONDS} seconds after wake-up"
-                ) from err
-            return response
+                self._set_vehicle_waking(vin, True)
+                response = await self._async_wake_up(vin)
+                if not self._wake_response_is_online(response):
+                    self._require_telemetry_receiver()
+                    try:
+                        await self._async_wait_for_telemetry_after(
+                            vin, telemetry_generation, telemetry_event
+                        )
+                    except TimeoutError as err:
+                        raise RuntimeError(
+                            f"Vehicle {vin} did not become ready within "
+                            f"{WAKE_TELEMETRY_TIMEOUT_SECONDS} seconds after wake-up"
+                        ) from err
+                return response
+            finally:
+                self._set_vehicle_waking(vin, False)
         finally:
             self._release_command_slot(vin)
 
