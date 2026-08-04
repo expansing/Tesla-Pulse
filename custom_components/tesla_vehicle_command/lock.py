@@ -9,7 +9,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import TeslaVehicleCommandCoordinator
-from .entity import TeslaVehicleCommandEntity
+from .entity import TeslaVehicleControlEntity
 
 
 async def async_setup_entry(
@@ -28,7 +28,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class TeslaLockEntity(TeslaVehicleCommandEntity, LockEntity):
+class TeslaLockEntity(TeslaVehicleControlEntity, LockEntity):
     """Lock entity for Tesla vehicle."""
 
     def __init__(

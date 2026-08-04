@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import TeslaVehicleCommandCoordinator
-from .entity import TeslaVehicleCommandEntity
+from .entity import TeslaVehicleControlEntity
 
 BUTTON_DESCRIPTIONS = [
     ButtonEntityDescription(
@@ -102,7 +102,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class TeslaButtonEntity(TeslaVehicleCommandEntity, ButtonEntity):
+class TeslaButtonEntity(TeslaVehicleControlEntity, ButtonEntity):
     """Button entity for Tesla vehicle commands."""
 
     def __init__(
@@ -122,7 +122,10 @@ class TeslaButtonEntity(TeslaVehicleCommandEntity, ButtonEntity):
     def available(self) -> bool:
         """Return whether this command can be sent."""
         if self.entity_description.key == "wake_up":
-            return self.coordinator.proxy_manager.is_running
+            return (
+                self.coordinator.proxy_manager.is_running
+                and not self.coordinator.is_command_in_progress(self.vin)
+            )
         return super().available
 
     async def async_press(self) -> None:
@@ -131,32 +134,31 @@ class TeslaButtonEntity(TeslaVehicleCommandEntity, ButtonEntity):
 
         # Map button keys to commands
         command_map = {
-            "wake_up": ("wake_up", {}),
-            "honk_horn": ("honk", {}),
-            "flash_lights": ("flash", {}),
-            "open_charge_port": ("charge_port_open", {}),
-            "close_charge_port": ("charge_port_close", {}),
-            "open_trunk": ("trunk_rear", {}),
-            "open_frunk": ("trunk_front", {}),
-            "vent_windows": ("window_vent", {}),
-            "close_windows": ("window_close", {}),
-            "preconditioning_start": ("climate_on", {}),
-            "preconditioning_stop": ("climate_off", {}),
+            "wake_up": "wake_up",
+            "honk_horn": "honk",
+            "flash_lights": "flash",
+            "open_charge_port": "charge_port_open",
+            "close_charge_port": "charge_port_close",
+            "open_trunk": "trunk_rear",
+            "open_frunk": "trunk_front",
+            "vent_windows": "window_vent",
+            "close_windows": "window_close",
+            "preconditioning_start": "climate_on",
+            "preconditioning_stop": "climate_off",
         }
 
         if key not in command_map:
             return
 
-        command, body = command_map[key]
+        command = command_map[key]
 
         try:
             if key == "wake_up":
                 await self.coordinator.async_wake_up(self.vin)
             else:
-                await self.coordinator.async_send_command(self.vin, command, body)
+                await self.coordinator.async_send_command(self.vin, command)
 
             # Request refresh
             await self.coordinator.async_request_refresh()
-        except Exception as err:
-            self._attr_available = False
+        except Exception:
             raise

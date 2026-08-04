@@ -43,3 +43,14 @@ class TeslaVehicleCommandEntity(CoordinatorEntity[TeslaVehicleCommandCoordinator
 
         vehicle_data = self.coordinator.data.get(self.vin, {})
         return "error" not in vehicle_data
+
+
+class TeslaVehicleControlEntity(TeslaVehicleCommandEntity):
+    """Base entity for a vehicle control that sends a command."""
+
+    @property
+    def available(self) -> bool:
+        """Return whether this control can send a new command."""
+        return super().available and not self.coordinator.is_command_in_progress(
+            self.vin
+        )

@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, MAX_TEMP, MIN_TEMP, TEMP_STEP
 from .coordinator import TeslaVehicleCommandCoordinator
-from .entity import TeslaVehicleCommandEntity
+from .entity import TeslaVehicleControlEntity
 
 
 async def async_setup_entry(
@@ -33,7 +33,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class TeslaClimateEntity(TeslaVehicleCommandEntity, ClimateEntity):
+class TeslaClimateEntity(TeslaVehicleControlEntity, ClimateEntity):
     """Climate entity for Tesla vehicle."""
 
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT_COOL]

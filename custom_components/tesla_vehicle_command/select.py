@@ -9,7 +9,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import TeslaVehicleCommandCoordinator
-from .entity import TeslaVehicleCommandEntity
+from .entity import TeslaVehicleControlEntity
 
 
 SEAT_HEATER_OPTIONS = ["Off", "Low", "Medium", "High"]
@@ -42,7 +42,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class TeslaSeatHeaterSelect(TeslaVehicleCommandEntity, SelectEntity):
+class TeslaSeatHeaterSelect(TeslaVehicleControlEntity, SelectEntity):
     """Select entity for seat heater level."""
 
     _attr_options = SEAT_HEATER_OPTIONS
@@ -83,12 +83,14 @@ class TeslaSeatHeaterSelect(TeslaVehicleCommandEntity, SelectEntity):
     async def async_select_option(self, option: str) -> None:
         level = SEAT_HEATER_OPTIONS.index(option)
         await self.coordinator.async_send_command(
-            self.vin, "seat_heater", {"seat_position": self._seat_index, "level": level}
+            self.vin,
+            "seat_heater",
+            {"seat_position": self._seat_index, "level": level},
         )
         await self.coordinator.async_request_refresh()
 
 
-class TeslaSteeringHeaterSelect(TeslaVehicleCommandEntity, SelectEntity):
+class TeslaSteeringHeaterSelect(TeslaVehicleControlEntity, SelectEntity):
     """Select entity for steering wheel heater."""
 
     _attr_options = ["Off", "On"]

@@ -72,6 +72,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_load_telemetry_cache()
     await coordinator.async_config_entry_first_refresh()
 
+    # Start telemetry before any optional startup wake so the wake operation
+    # can wait for a vehicle frame without timing out.
+    telemetry_consumer = await async_setup_telemetry_consumer(hass, coordinator)
+
     if entry.options.get(CONF_WAKE_ON_STARTUP, False):
         # Refresh cached state from the Fleet API only when the user opts in.
         for vehicle in coordinator.vehicles:
@@ -92,9 +96,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         _LOGGER.info("Restored cached telemetry state without waking vehicles")
 
-    # Initialize telemetry consumer (auto-discovers endpoint via Supervisor API)
-    telemetry_consumer = await async_setup_telemetry_consumer(hass, coordinator)
-
     hass.data[DOMAIN][entry.entry_id] = {
         "coordinator": coordinator,
         "proxy_manager": proxy_manager,
@@ -114,7 +115,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise ValueError("PIN required when enabling valet mode")
 
         if enabled:
-            await coordinator.async_send_command(vin, "valet_mode_on", {"pin": pin})
+            await coordinator.async_send_command(
+                vin, "valet_mode_on", {"on": True, "pin": pin}
+            )
         else:
             await coordinator.async_send_command(vin, "valet_mode_off")
 
