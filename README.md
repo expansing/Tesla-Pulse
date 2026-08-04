@@ -483,7 +483,7 @@ The **Battery Balance Score** adjusts its thresholds based on State of Charge (S
 | **50–89%** | ≤ 20 mV | ≤ 30 mV | ≤ 50 mV | > 50 mV |
 | **< 50%** | ≤ 40 mV | ≤ 80 mV | ≤ 120 mV | > 120 mV |
 
-This avoids false alarms at low SOC where the voltage curve steepens and small capacity differences produce larger voltage spreads. The score is computed from a valid same-record extrema pair when SOC is available.
+This avoids false alarms at low SOC where the voltage curve steepens and small capacity differences produce larger voltage spreads. The score uses the last valid same-record imbalance and the most recent valid SOC.
 
 All four sensors are categorized as **Diagnostic** and appear under the vehicle device in **Settings > Devices & services**.
 
