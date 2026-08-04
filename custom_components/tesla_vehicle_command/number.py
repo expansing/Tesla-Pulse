@@ -18,7 +18,7 @@ from .const import (
     TEMP_STEP,
 )
 from .coordinator import TeslaVehicleCommandCoordinator
-from .entity import TeslaVehicleCommandEntity
+from .entity import TeslaVehicleControlEntity
 
 
 async def async_setup_entry(
@@ -40,7 +40,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class TeslaChargeLimitNumber(TeslaVehicleCommandEntity, NumberEntity):
+class TeslaChargeLimitNumber(TeslaVehicleControlEntity, NumberEntity):
     """Number entity for charge limit."""
 
     _attr_native_min_value = CHARGE_LIMIT_MIN
@@ -74,7 +74,7 @@ class TeslaChargeLimitNumber(TeslaVehicleCommandEntity, NumberEntity):
         await self.coordinator.async_request_refresh()
 
 
-class TeslaTargetTemperatureNumber(TeslaVehicleCommandEntity, NumberEntity):
+class TeslaTargetTemperatureNumber(TeslaVehicleControlEntity, NumberEntity):
     """Number entity for target temperature."""
 
     _attr_native_min_value = MIN_TEMP

@@ -9,7 +9,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import TeslaVehicleCommandCoordinator
-from .entity import TeslaVehicleCommandEntity
+from .entity import TeslaVehicleControlEntity
 
 
 async def async_setup_entry(
@@ -32,7 +32,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class TeslaSentryModeSwitch(TeslaVehicleCommandEntity, SwitchEntity):
+class TeslaSentryModeSwitch(TeslaVehicleControlEntity, SwitchEntity):
     """Switch for Sentry Mode."""
 
     def __init__(
@@ -62,7 +62,7 @@ class TeslaSentryModeSwitch(TeslaVehicleCommandEntity, SwitchEntity):
         await self.coordinator.async_request_refresh()
 
 
-class TeslaChargePortSwitch(TeslaVehicleCommandEntity, SwitchEntity):
+class TeslaChargePortSwitch(TeslaVehicleControlEntity, SwitchEntity):
     """Switch for Charge Port."""
 
     def __init__(
@@ -92,7 +92,7 @@ class TeslaChargePortSwitch(TeslaVehicleCommandEntity, SwitchEntity):
         await self.coordinator.async_request_refresh()
 
 
-class TeslaDefrostSwitch(TeslaVehicleCommandEntity, SwitchEntity):
+class TeslaDefrostSwitch(TeslaVehicleControlEntity, SwitchEntity):
     """Switch for Defrost (max AC + heat + rear defrost)."""
 
     def __init__(

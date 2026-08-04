@@ -13,7 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import TeslaVehicleCommandCoordinator
-from .entity import TeslaVehicleCommandEntity
+from .entity import TeslaVehicleControlEntity
 
 
 async def async_setup_entry(
@@ -36,7 +36,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class TeslaTrunkEntity(TeslaVehicleCommandEntity, CoverEntity):
+class TeslaTrunkEntity(TeslaVehicleControlEntity, CoverEntity):
     """Cover entity for Tesla trunk/frunk."""
 
     _attr_device_class = CoverDeviceClass.DOOR
@@ -88,7 +88,7 @@ class TeslaTrunkEntity(TeslaVehicleCommandEntity, CoverEntity):
             await self.coordinator.async_request_refresh()
 
 
-class TeslaWindowsEntity(TeslaVehicleCommandEntity, CoverEntity):
+class TeslaWindowsEntity(TeslaVehicleControlEntity, CoverEntity):
     """Cover entity for Tesla windows."""
 
     _attr_device_class = CoverDeviceClass.WINDOW

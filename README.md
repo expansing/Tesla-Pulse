@@ -370,14 +370,17 @@ When enabled, Tesla Pulse restores the cache first, then wakes every configured 
 
 Tesla Pulse also exposes a **Vehicle Awake Status** diagnostic sensor. A vehicle is `Awake` while Fleet Telemetry frames are arriving and becomes `Asleep` after the configured **Minutes without telemetry before vehicle is asleep** interval.
 
-Enable **Wake vehicle before sending commands** to avoid command failures while a vehicle is asleep. Before a command is sent, Tesla Pulse checks **Vehicle Awake Status**:
+Tesla Pulse requires Fleet Telemetry to be running before it sends vehicle
+commands. Before every non-wake command, it follows this sequence:
 
-1. If the vehicle is already awake, the command is sent immediately.
-2. If the vehicle is asleep, Tesla Pulse sends a wake-up request.
-3. Tesla Pulse waits for the next vehicle telemetry frame, confirming that the vehicle is awake.
-4. The original command is sent only after that confirmation.
+1. Tesla Pulse records the current telemetry generation and sends a wake-up request.
+2. It waits for the next vehicle telemetry frame, confirming that the vehicle is awake.
+3. The original command is sent only after that confirmation.
 
-Commands for the same vehicle are serialized while this sequence runs. If no telemetry frame arrives within 90 seconds after wake-up, the command fails with an explicit timeout instead of being sent prematurely.
+While this sequence runs, Tesla Pulse disables controls for that vehicle and
+rejects additional commands for the same vehicle instead of queuing them. If no
+telemetry frame arrives within 90 seconds after wake-up, the command fails with
+an explicit timeout instead of being sent prematurely.
 
 Advanced rear-left and rear-right powertrain diagnostics are disabled by default because many vehicles do not expose those channels. Tesla Pulse also evaluates explicit optional telemetry groups across completed awake sessions. After at least two sessions containing three or more vehicle telemetry frames without a valid group signal, it disables the corresponding REL/RER or Powershare entities. A valid signal re-enables only entities that Tesla Pulse disabled itself; manually disabled entities are unchanged. Tonneau, sunroof, and rear-display HVAC capability observations are retained for future entity support, but have no current entity to enable or disable. Tesla `<INVALID>` values are not used as evidence of absent hardware.
 

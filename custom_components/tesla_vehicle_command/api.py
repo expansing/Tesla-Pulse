@@ -117,7 +117,7 @@ class TeslaVehicleCommandAPI:
         """Send a command to the vehicle."""
         # Map command to API command
         api_command = COMMANDS.get(command, command)
-        command_body = COMMAND_BODIES.get(command, body or {})
+        command_body = body if body is not None else COMMAND_BODIES.get(command, {})
 
         path = API_COMMAND.format(vin=vin, command=api_command)
         result = await self._request("POST", path, json_data=command_body)
