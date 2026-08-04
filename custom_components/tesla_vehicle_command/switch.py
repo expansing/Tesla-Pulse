@@ -55,10 +55,16 @@ class TeslaSentryModeSwitch(TeslaVehicleControlEntity, SwitchEntity):
 
     async def async_turn_on(self, **kwargs) -> None:
         await self.coordinator.async_send_command(self.vin, "sentry_on")
+        self.coordinator.set_vehicle_state_after_command(
+            self.vin, "sentry_mode", True
+        )
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:
         await self.coordinator.async_send_command(self.vin, "sentry_off")
+        self.coordinator.set_vehicle_state_after_command(
+            self.vin, "sentry_mode", False
+        )
         await self.coordinator.async_request_refresh()
 
 
