@@ -440,6 +440,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def is_vehicle_awake(self, vin: str) -> bool:
         """Return whether the vehicle has sent telemetry recently."""
         metadata = self._telemetry_metadata.get(vin, {})
+        connectivity_status = str(metadata.get("connectivity_status", "")).strip().upper()
+        if connectivity_status == "DISCONNECTED":
+            return False
+
         last_received = metadata.get("last_received")
         return bool(
             isinstance(last_received, datetime)
