@@ -602,6 +602,17 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise RuntimeError("Command returned an invalid success response")
         return response
 
+    @staticmethod
+    def _wake_response_is_online(response: Any) -> bool:
+        """Return whether a wake response explicitly reports an online vehicle."""
+        if not isinstance(response, dict):
+            return False
+        payload = response.get("response", response)
+        return (
+            isinstance(payload, dict)
+            and str(payload.get("state", "")).strip().lower() == "online"
+        )
+
     def shutdown(self) -> None:
         """Cancel coordinator timers."""
         for timer in self._sleep_timers.values():
@@ -1200,6 +1211,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._set_vehicle_waking(vin, True)
                 self._require_telemetry_receiver()
                 response = await self._async_wake_up(vin)
+                if self._wake_response_is_online(response):
+                    self.set_connectivity_status(vin, "CONNECTED")
+                    return response
                 try:
                     await self._async_wait_for_telemetry_after(
                         vin, telemetry_generation, telemetry_event
