@@ -124,6 +124,7 @@ class TeslaButtonEntity(TeslaVehicleControlEntity, ButtonEntity):
         if self.entity_description.key == "wake_up":
             return (
                 self.coordinator.proxy_manager.is_running
+                and not self.coordinator.is_vehicle_awake(self.vin)
                 and not self.coordinator.is_vehicle_waking(self.vin)
             )
         return super().available
