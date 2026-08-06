@@ -527,13 +527,38 @@ class TelemetryConsumer:
     ) -> None:
         """Process connectivity events."""
         # Connectivity events indicate vehicle online/offline/sleeping
-        status = str(data.get("status", "unknown"))
+        status = self._connectivity_status(data.get("status"))
         response.setdefault("vehicle_state", {})
         response["vehicle_state"]["connectivity_status"] = status
         self.coordinator.set_connectivity_status(vin, status)
 
-        if status.upper() in {"CONNECTED", "ONLINE"}:
+        if status == "CONNECTED":
             _LOGGER.info("Vehicle %s connected via telemetry", vin)
+
+    @classmethod
+    def _connectivity_status(cls, value: Any) -> str:
+        """Normalize Fleet Telemetry connectivity enum representations."""
+        value = cls._unwrap_value(value)
+        if isinstance(value, bool):
+            return "UNKNOWN"
+        if isinstance(value, (int, float)) and float(value).is_integer():
+            return {0: "UNKNOWN", 1: "CONNECTED", 2: "DISCONNECTED"}.get(
+                int(value), "UNKNOWN"
+            )
+
+        normalized = str(value or "").strip().upper().replace("-", "_")
+        aliases = {
+            "CONNECTED": "CONNECTED",
+            "ONLINE": "CONNECTED",
+            "CONNECTIVITY_EVENT_CONNECTED": "CONNECTED",
+            "CONNECTIVITYEVENTCONNECTED": "CONNECTED",
+            "VEHICLE_CONNECTIVITY_CONNECTED": "CONNECTED",
+            "DISCONNECTED": "DISCONNECTED",
+            "CONNECTIVITY_EVENT_DISCONNECTED": "DISCONNECTED",
+            "CONNECTIVITYEVENTDISCONNECTED": "DISCONNECTED",
+            "VEHICLE_CONNECTIVITY_DISCONNECTED": "DISCONNECTED",
+        }
+        return aliases.get(normalized, "UNKNOWN")
 
     def _apply_charging_composites(
         self,
