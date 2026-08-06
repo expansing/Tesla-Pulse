@@ -60,6 +60,16 @@
           "telemetry_port": "Public TCP port for the Fleet Telemetry receiver.",
           "wake_on_startup": "When enabled, wakes each vehicle and refreshes its state through the Fleet API after Home Assistant starts. When disabled, the last cached telemetry state is restored and the vehicle remains asleep until telemetry arrives."
         }
+      },
+      "battery": {
+        "title": "Battery health reference for {vehicle_name}",
+        "description": "Enter the usable battery capacity when new for {vehicle_name} ({vin}). Leave blank to disable the SOH percentage while still estimating current usable capacity.",
+        "data": {
+          "battery_reference_capacity_kwh": "Usable battery capacity when new"
+        },
+        "data_description": {
+          "battery_reference_capacity_kwh": "The pack's original usable capacity in kWh, excluding inaccessible buffers. This is a user-provided reference, not nominal nameplate capacity."
+        }
       }
     }
   },
@@ -75,6 +85,9 @@
       "charge_current": { "name": "Charge Current" },
       "charge_power": { "name": "Charge Power" },
       "charge_energy_added": { "name": "Charge Energy Added" },
+      "estimated_usable_capacity": { "name": "Estimated Usable Battery Capacity" },
+      "estimated_battery_soh": { "name": "Estimated Battery State of Health" },
+      "battery_soh_confidence": { "name": "Battery SOH Confidence" },
       "time_to_full_charge": { "name": "Time to Full Charge" },
       "inside_temp": { "name": "Inside Temperature" },
       "isolation_resistance": { "name": "Isolation Resistance" },

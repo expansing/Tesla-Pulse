@@ -465,6 +465,19 @@ class TelemetryConsumer:
                     processed_fields.add(signal_name)
 
         received_fields = set(signals)
+        if {"Soc", "EnergyRemaining"}.issubset(processed_fields):
+            charge_state = response["charge_state"]
+            soc_percent = self._to_float(signals.get("Soc"))
+            energy_remaining_kwh = self._to_float(
+                signals.get("EnergyRemaining")
+            )
+            charge_state.update(
+                self.coordinator.record_battery_capacity_sample(
+                    vin,
+                    soc_percent,
+                    energy_remaining_kwh,
+                )
+            )
         self._apply_charging_composites(
             vin,
             response,
