@@ -7,6 +7,7 @@ import logging
 import math
 import ssl
 from datetime import datetime, timedelta
+from statistics import median
 from typing import Any, Callable
 
 import aiohttp
@@ -22,6 +23,7 @@ from .const import (
     API_WAKE_UP,
     COMMAND_BODIES,
     COMMANDS,
+    CONF_BATTERY_REFERENCE_CAPACITIES,
     CONF_TELEMETRY_HOSTNAME,
     CONF_TELEMETRY_INACTIVITY_MINUTES,
     CONF_TELEMETRY_PORT,
@@ -273,6 +275,11 @@ _FLEET_TELEMETRY_FIELDS = {
 
 _TELEMETRY_STORE_VERSION = 2
 _COMMAND_STATE_CONFIRMATION_TIMEOUT = timedelta(seconds=30)
+_BATTERY_CAPACITY_MIN_SOC_SPAN = 20.0
+_BATTERY_CAPACITY_MAX_SESSION_GAP = timedelta(hours=6)
+_BATTERY_CAPACITY_MIN_KWH = 10.0
+_BATTERY_CAPACITY_MAX_KWH = 200.0
+_BATTERY_CAPACITY_MAX_ESTIMATES = 12
 _COMMAND_STATE_SIGNALS = {
     ("charge_state", "charge_limit_soc"): "ChargeLimitSoc",
     ("charge_state", "charge_port_door_open"): "ChargePortDoorOpen",
@@ -357,6 +364,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._pending_command_states: dict[
             tuple[str, str, str], tuple[Any, datetime]
         ] = {}
+        self._battery_capacity_models: dict[str, dict[str, Any]] = {}
         self._sleep_timers: dict[str, asyncio.TimerHandle] = {}
 
         super().__init__(
@@ -710,6 +718,26 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for vin, groups in capabilities.items()
                 if vin in data and isinstance(groups, dict)
             }
+        battery_capacity_models = stored_cache.get("battery_capacity_models", {})
+        if isinstance(battery_capacity_models, dict):
+            self._battery_capacity_models = {
+                vin: model
+                for vin, model in battery_capacity_models.items()
+                if vin in data and isinstance(model, dict)
+            }
+        for vin, vehicle_data in data.items():
+            response = vehicle_data.get("response", {})
+            charge_state = response.get("charge_state")
+            if not isinstance(charge_state, dict):
+                charge_state = {}
+                response["charge_state"] = charge_state
+            for key in (
+                "estimated_usable_capacity",
+                "estimated_battery_soh",
+                "battery_soh_confidence",
+            ):
+                charge_state.pop(key, None)
+            charge_state.update(self._battery_capacity_metrics(vin))
         self.async_set_updated_data(data)
 
     def get_telemetry_raw_signals(self, vin: str) -> dict[str, Any]:
@@ -731,7 +759,143 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "metadata": metadata,
             "raw_signals": self._telemetry_raw_signals,
             "signal_capabilities": self._signal_capabilities,
+            "battery_capacity_models": self._battery_capacity_models,
         }
+
+    def record_battery_capacity_sample(
+        self, vin: str, soc_percent: Any, energy_remaining_kwh: Any
+    ) -> dict[str, Any]:
+        """Estimate usable battery capacity from a same-record SOC/energy pair."""
+        if (
+            not self._is_finite_number(soc_percent)
+            or not self._is_finite_number(energy_remaining_kwh)
+            or not 0 <= soc_percent <= 100
+            or energy_remaining_kwh < 0
+        ):
+            return {}
+
+        now = datetime.now().astimezone()
+        sample = {
+            "soc": float(soc_percent),
+            "energy": float(energy_remaining_kwh),
+            "timestamp": now.isoformat(),
+        }
+        model = self._battery_capacity_models.setdefault(vin, {})
+        anchor = model.get("anchor")
+        last_sample = model.get("last_sample")
+        previous_direction = model.get("direction")
+
+        if isinstance(last_sample, dict):
+            try:
+                last_timestamp = datetime.fromisoformat(last_sample["timestamp"])
+                if last_timestamp.tzinfo is None:
+                    raise ValueError("Battery sample timestamp has no timezone")
+                soc_step = sample["soc"] - float(last_sample["soc"])
+                energy_step = sample["energy"] - float(last_sample["energy"])
+            except (KeyError, TypeError, ValueError):
+                anchor = sample
+            else:
+                step_direction = 1 if soc_step > 0 else -1 if soc_step < 0 else 0
+                if (
+                    now - last_timestamp > _BATTERY_CAPACITY_MAX_SESSION_GAP
+                    or soc_step * energy_step < 0
+                    or (
+                        step_direction
+                        and previous_direction in (-1, 1)
+                        and step_direction != previous_direction
+                    )
+                ):
+                    anchor = sample
+                if step_direction and soc_step * energy_step > 0:
+                    model["direction"] = step_direction
+
+        if not isinstance(anchor, dict):
+            anchor = sample
+
+        try:
+            soc_delta = sample["soc"] - float(anchor["soc"])
+            energy_delta = sample["energy"] - float(anchor["energy"])
+        except (KeyError, TypeError, ValueError):
+            soc_delta = 0.0
+            energy_delta = 0.0
+            anchor = sample
+
+        if (
+            abs(soc_delta) >= _BATTERY_CAPACITY_MIN_SOC_SPAN
+            and soc_delta * energy_delta > 0
+        ):
+            capacity_kwh = abs(energy_delta) * 100 / abs(soc_delta)
+            if _BATTERY_CAPACITY_MIN_KWH <= capacity_kwh <= _BATTERY_CAPACITY_MAX_KWH:
+                stored_estimates = model.get("estimates", [])
+                estimates = (
+                    list(stored_estimates)
+                    if isinstance(stored_estimates, list)
+                    else []
+                )
+                estimates.append(
+                    {
+                        "capacity_kwh": round(capacity_kwh, 3),
+                        "soc_span": round(abs(soc_delta), 3),
+                    }
+                )
+                model["estimates"] = estimates[-_BATTERY_CAPACITY_MAX_ESTIMATES:]
+                anchor = sample
+
+        model["anchor"] = anchor
+        model["last_sample"] = sample
+        return self._battery_capacity_metrics(vin)
+
+    def _battery_capacity_metrics(self, vin: str) -> dict[str, Any]:
+        """Return capacity metrics derived from persisted estimates and options."""
+        model = self._battery_capacity_models.get(vin, {})
+        estimates = model.get("estimates", [])
+        if not isinstance(estimates, list):
+            return {}
+        capacities: list[float] = []
+        total_soc_span = 0.0
+        for estimate in estimates:
+            if not isinstance(estimate, dict):
+                continue
+            capacity = estimate.get("capacity_kwh")
+            soc_span = estimate.get("soc_span")
+            if (
+                isinstance(capacity, (int, float))
+                and not isinstance(capacity, bool)
+                and math.isfinite(capacity)
+                and _BATTERY_CAPACITY_MIN_KWH
+                <= capacity
+                <= _BATTERY_CAPACITY_MAX_KWH
+                and isinstance(soc_span, (int, float))
+                and not isinstance(soc_span, bool)
+                and math.isfinite(soc_span)
+                and _BATTERY_CAPACITY_MIN_SOC_SPAN <= soc_span <= 100
+            ):
+                capacities.append(float(capacity))
+                total_soc_span += float(soc_span)
+        if not capacities:
+            return {}
+
+        estimated_capacity = round(float(median(capacities)), 2)
+        confidence = round(min(100.0, total_soc_span), 1)
+        metrics: dict[str, Any] = {
+            "estimated_usable_capacity": estimated_capacity,
+            "battery_soh_confidence": confidence,
+        }
+        references = self.entry.options.get(CONF_BATTERY_REFERENCE_CAPACITIES, {})
+        reference_capacity = references.get(vin) if isinstance(references, dict) else None
+        if (
+            isinstance(reference_capacity, (int, float))
+            and not isinstance(reference_capacity, bool)
+            and math.isfinite(reference_capacity)
+        ):
+            reference_capacity_kwh = float(reference_capacity)
+        else:
+            reference_capacity_kwh = 0.0
+        if reference_capacity_kwh > 0:
+            metrics["estimated_battery_soh"] = round(
+                estimated_capacity / reference_capacity_kwh * 100, 1
+            )
+        return metrics
 
     def set_telemetry_data(
         self,

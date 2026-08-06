@@ -21,6 +21,8 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
 )
 
 from .const import (
+    CONF_BATTERY_REFERENCE_CAPACITIES,
+    CONF_BATTERY_REFERENCE_CAPACITY_KWH,
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_FLEET_API_BASE_URL,
@@ -436,12 +438,27 @@ class TeslaVehicleCommandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
     """Handle Tesla Pulse integration options."""
 
+    def __init__(self) -> None:
+        """Initialize options collected across vehicle-specific steps."""
+        super().__init__()
+        self._pending_options: dict[str, Any] = {}
+        self._battery_references: dict[str, float] = {}
+        self._battery_vehicle_index = 0
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Manage Fleet Telemetry receiver settings."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            self._pending_options = {**self.config_entry.options, **user_input}
+            references = self.config_entry.options.get(
+                CONF_BATTERY_REFERENCE_CAPACITIES, {}
+            )
+            self._battery_references = (
+                dict(references) if isinstance(references, dict) else {}
+            )
+            self._battery_vehicle_index = 0
+            return await self.async_step_battery()
 
         telemetry_hostname = self.config_entry.options.get(
             CONF_TELEMETRY_HOSTNAME, ""
@@ -487,3 +504,58 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
         )
 
         return self.async_show_form(step_id="init", data_schema=schema)
+
+    async def async_step_battery(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect the new usable battery capacity for each configured vehicle."""
+        vehicles = self.config_entry.data.get(CONF_VEHICLES, [])
+        if self._battery_vehicle_index >= len(vehicles):
+            self._pending_options[CONF_BATTERY_REFERENCE_CAPACITIES] = (
+                self._battery_references
+            )
+            return self.async_create_entry(title="", data=self._pending_options)
+
+        vehicle = vehicles[self._battery_vehicle_index]
+        vin = vehicle[CONF_VIN]
+        if user_input is not None:
+            reference_capacity = user_input.get(
+                CONF_BATTERY_REFERENCE_CAPACITY_KWH
+            )
+            if reference_capacity is None:
+                self._battery_references.pop(vin, None)
+            else:
+                self._battery_references[vin] = float(reference_capacity)
+            self._battery_vehicle_index += 1
+            return await self.async_step_battery()
+
+        current_capacity = self._battery_references.get(vin)
+        marker_options = (
+            {"description": {"suggested_value": current_capacity}}
+            if current_capacity is not None
+            else {}
+        )
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_BATTERY_REFERENCE_CAPACITY_KWH,
+                    **marker_options,
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=10,
+                        max=200,
+                        step=0.1,
+                        unit_of_measurement="kWh",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(
+            step_id="battery",
+            data_schema=schema,
+            description_placeholders={
+                "vehicle_name": vehicle.get(CONF_NAME, vin),
+                "vin": vin,
+            },
+        )

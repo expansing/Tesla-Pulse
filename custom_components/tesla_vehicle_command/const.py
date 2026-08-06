@@ -30,6 +30,8 @@ CONF_TELEMETRY_INACTIVITY_MINUTES = "telemetry_inactivity_minutes"
 CONF_TELEMETRY_PORT = "telemetry_port"
 CONF_WAKE_BEFORE_COMMAND = "wake_before_command"
 CONF_WAKE_ON_STARTUP = "wake_on_startup"
+CONF_BATTERY_REFERENCE_CAPACITIES = "battery_reference_capacities"
+CONF_BATTERY_REFERENCE_CAPACITY_KWH = "battery_reference_capacity_kwh"
 OPT_OPTIONAL_POWERTRAIN_SENSORS_MIGRATED = "optional_powertrain_sensors_migrated"
 
 DEFAULT_TELEMETRY_INACTIVITY_MINUTES = 15
