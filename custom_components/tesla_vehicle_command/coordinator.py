@@ -1126,28 +1126,18 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         command: str,
         body: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Wake, await a fresh telemetry frame, then execute one command."""
+        """Execute one command for a vehicle that telemetry reports as awake."""
         if not self.proxy_manager.is_running:
             raise RuntimeError("Proxy not running")
 
-        if command != "wake_up" and not self.is_vehicle_awake(vin):
-            telemetry_generation, telemetry_event = self._prepare_telemetry_wait(vin)
-            _LOGGER.info("Waking vehicle %s before command %s", vin, command)
-            try:
-                self._set_vehicle_waking(vin, True)
-                self._require_telemetry_receiver()
-                await self._async_wake_up(vin)
-                try:
-                    await self._async_wait_for_telemetry_after(
-                        vin, telemetry_generation, telemetry_event
-                    )
-                except TimeoutError as err:
-                    raise RuntimeError(
-                        f"Vehicle {vin} did not become ready within "
-                        f"{WAKE_TELEMETRY_TIMEOUT_SECONDS} seconds after wake-up"
-                    ) from err
-            finally:
-                self._set_vehicle_waking(vin, False)
+        if command == "wake_up":
+            raise RuntimeError("Use async_wake_up to wake a vehicle")
+
+        if not self.is_vehicle_awake(vin):
+            raise RuntimeError(
+                f"Vehicle {vin} is asleep. Wake it and wait for it to become available "
+                "before sending commands."
+            )
 
         await self._ensure_valid_token()
 
