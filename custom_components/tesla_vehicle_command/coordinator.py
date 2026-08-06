@@ -272,6 +272,28 @@ _FLEET_TELEMETRY_FIELDS = {
 }
 
 _TELEMETRY_STORE_VERSION = 2
+_COMMAND_STATE_CONFIRMATION_TIMEOUT = timedelta(seconds=30)
+_COMMAND_STATE_SIGNALS = {
+    ("charge_state", "charge_limit_soc"): "ChargeLimitSoc",
+    ("charge_state", "charge_port_door_open"): "ChargePortDoorOpen",
+    ("climate_state", "defrost_mode"): "DefrostMode",
+    ("climate_state", "driver_temp_setting"): "HvacLeftTemperatureRequest",
+    ("climate_state", "is_climate_on"): "HvacPower",
+    ("climate_state", "passenger_temp_setting"): "HvacRightTemperatureRequest",
+    ("climate_state", "seat_heater_left"): "SeatHeaterLeft",
+    ("climate_state", "seat_heater_rear_left"): "SeatHeaterRearLeft",
+    ("climate_state", "seat_heater_rear_right"): "SeatHeaterRearRight",
+    ("climate_state", "seat_heater_right"): "SeatHeaterRight",
+    ("climate_state", "steering_wheel_heater"): "HvacSteeringWheelHeatLevel",
+    ("vehicle_state", "fd_window"): "FdWindow",
+    ("vehicle_state", "fp_window"): "FpWindow",
+    ("vehicle_state", "ft"): "DoorState.TrunkFront",
+    ("vehicle_state", "locked"): "Locked",
+    ("vehicle_state", "rd_window"): "RdWindow",
+    ("vehicle_state", "rp_window"): "RpWindow",
+    ("vehicle_state", "sentry_mode"): "SentryMode",
+    ("vehicle_state", "valet_mode"): "ValetModeEnabled",
+}
 
 _OPTIONAL_CAPABILITY_GROUPS = {
     "powertrain_rel_rer": {
@@ -332,6 +354,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
         self._commands_in_progress: set[str] = set()
         self._vehicles_waking: set[str] = set()
+        self._pending_command_states: dict[
+            tuple[str, str, str], tuple[Any, datetime]
+        ] = {}
         self._sleep_timers: dict[str, asyncio.TimerHandle] = {}
 
         super().__init__(
@@ -569,10 +594,12 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Reject command responses that Tesla reports as unsuccessful."""
         if not isinstance(response, dict):
             raise RuntimeError("Command returned an invalid response")
-        payload = response.get("response")
-        if isinstance(payload, dict) and payload.get("result") is False:
-            reason = payload.get("reason") or "Tesla rejected the command"
-            raise RuntimeError(f"Command failed: {reason}")
+        payload = response.get("response", response)
+        if not isinstance(payload, dict) or payload.get("result") is not True:
+            if isinstance(payload, dict) and payload.get("result") is False:
+                reason = payload.get("reason") or "Tesla rejected the command"
+                raise RuntimeError(f"Command failed: {reason}")
+            raise RuntimeError("Command returned an invalid success response")
         return response
 
     def shutdown(self) -> None:
@@ -712,6 +739,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Apply the score and door composites without deriving telemetry-owned
         # brick imbalance from independently received extrema.
         processed_response = self._process_vehicle_response(response)
+        self._reconcile_command_states(vin, processed_response, processed_fields)
 
         updated_data = dict(self.data or self._empty_telemetry_data())
         updated_data[vin] = {"response": processed_response}
@@ -720,19 +748,149 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._telemetry_store_payload, 30
         )
 
-    def set_vehicle_state_after_command(
-        self, vin: str, key: str, value: Any
+    def _publish_command_state(
+        self, vin: str, updates: dict[str, dict[str, Any]]
     ) -> None:
-        """Publish an optimistic state that subsequent telemetry can correct."""
+        """Publish deterministic state after a successful command."""
         updated_data = dict(self.data or self._empty_telemetry_data())
         vehicle_data = dict(updated_data.get(vin, {}))
         response = dict(vehicle_data.get("response", {}))
-        vehicle_state = dict(response.get("vehicle_state", {}))
-        vehicle_state[key] = value
-        response["vehicle_state"] = vehicle_state
+        for section_name, section_updates in updates.items():
+            section = dict(response.get(section_name, {}))
+            section.update(section_updates)
+            response[section_name] = section
+            for key, value in section_updates.items():
+                if (section_name, key) in _COMMAND_STATE_SIGNALS:
+                    self._pending_command_states[(vin, section_name, key)] = (
+                        value,
+                        datetime.now().astimezone()
+                        + _COMMAND_STATE_CONFIRMATION_TIMEOUT,
+                    )
         vehicle_data["response"] = response
         updated_data[vin] = vehicle_data
         self.async_set_updated_data(updated_data)
+
+    def _reconcile_command_states(
+        self,
+        vin: str,
+        response: dict[str, Any],
+        processed_fields: set[str] | None,
+    ) -> None:
+        """Keep accepted command state until matching telemetry or timeout."""
+        now = datetime.now().astimezone()
+        for pending_key, (expected, expires_at) in list(
+            self._pending_command_states.items()
+        ):
+            pending_vin, section_name, key = pending_key
+            if now >= expires_at:
+                self._pending_command_states.pop(pending_key, None)
+                continue
+            if pending_vin != vin or not processed_fields:
+                continue
+            signal_name = _COMMAND_STATE_SIGNALS[(section_name, key)]
+            if signal_name not in processed_fields:
+                continue
+            section = response.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            if section.get(key) == expected:
+                self._pending_command_states.pop(pending_key, None)
+            else:
+                section[key] = expected
+
+    def _complete_command_response(
+        self,
+        vin: str,
+        command: str,
+        body: dict[str, Any],
+        response: Any,
+    ) -> dict[str, Any]:
+        """Validate a command response and publish its deterministic outcome."""
+        validated_response = self._validate_command_response(response)
+        updates = self._command_state_updates(command, body)
+        if updates:
+            self._publish_command_state(vin, updates)
+        return validated_response
+
+    def _command_state_updates(
+        self, command: str, body: dict[str, Any]
+    ) -> dict[str, dict[str, Any]]:
+        """Return deterministic state changes for an accepted command."""
+        fixed_updates: dict[str, dict[str, dict[str, Any]]] = {
+            "lock": {"vehicle_state": {"locked": True}},
+            "unlock": {"vehicle_state": {"locked": False}},
+            "sentry_on": {"vehicle_state": {"sentry_mode": True}},
+            "sentry_off": {"vehicle_state": {"sentry_mode": False}},
+            "valet_mode_on": {"vehicle_state": {"valet_mode": True}},
+            "valet_mode_off": {"vehicle_state": {"valet_mode": False}},
+            "charge_port_open": {
+                "charge_state": {"charge_port_door_open": True}
+            },
+            "charge_port_close": {
+                "charge_state": {"charge_port_door_open": False}
+            },
+            "climate_on": {"climate_state": {"is_climate_on": True}},
+            "climate_off": {"climate_state": {"is_climate_on": False}},
+            "preconditioning_max": {
+                "climate_state": {"defrost_mode": "Max"}
+            },
+            "preconditioning_max_off": {
+                "climate_state": {"defrost_mode": "Off"}
+            },
+        }
+        if command in fixed_updates:
+            return fixed_updates[command]
+
+        if command == "steering_heater" and isinstance(body.get("on"), bool):
+            return {
+                "climate_state": {"steering_wheel_heater": body["on"]}
+            }
+        if command == "set_temps" and isinstance(
+            temperature := body.get("driver_temp"), (int, float)
+        ) and not isinstance(temperature, bool):
+            passenger_temperature = body.get("passenger_temp", temperature)
+            if isinstance(passenger_temperature, bool) or not isinstance(
+                passenger_temperature, (int, float)
+            ):
+                return {}
+            return {
+                "climate_state": {
+                    "driver_temp_setting": temperature,
+                    "passenger_temp_setting": passenger_temperature,
+                }
+            }
+        if command == "set_charge_limit" and isinstance(
+            percent := body.get("percent"), (int, float)
+        ) and not isinstance(percent, bool):
+            return {"charge_state": {"charge_limit_soc": int(percent)}}
+        if command == "seat_heater":
+            seat_keys = (
+                "seat_heater_left",
+                "seat_heater_right",
+                "seat_heater_rear_left",
+                "seat_heater_rear_right",
+            )
+            seat_position = body.get("seat_position")
+            level = body.get("level")
+            if (
+                isinstance(seat_position, int)
+                and not isinstance(seat_position, bool)
+                and 0 <= seat_position < len(seat_keys)
+                and isinstance(level, int)
+                and not isinstance(level, bool)
+            ):
+                return {"climate_state": {seat_keys[seat_position]: level}}
+        if command in {"window_vent", "window_close"}:
+            position = 1 if command == "window_vent" else 0
+            return {
+                "vehicle_state": {
+                    key: position
+                    for key in ("fd_window", "fp_window", "rd_window", "rp_window")
+                }
+            }
+        if command == "trunk_front":
+            return {"vehicle_state": {"ft": "Open"}}
+        return {}
 
     def _process_vehicle_response(self, response: dict[str, Any]) -> dict[str, Any]:
         """Process vehicle response to compute derived fields."""
@@ -1027,13 +1185,17 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if retry_resp.status != 200:
                         text = await retry_resp.text()
                         raise RuntimeError(f"Command failed: {retry_resp.status} - {text}")
-                    return self._validate_command_response(await retry_resp.json())
+                    return self._complete_command_response(
+                        vin, command, body, await retry_resp.json()
+                    )
 
             if resp.status != 200:
                 text = await resp.text()
                 raise RuntimeError(f"Command failed: {resp.status} - {text}")
 
-            return self._validate_command_response(await resp.json())
+            return self._complete_command_response(
+                vin, command, body, await resp.json()
+            )
 
     async def async_wake_up(self, vin: str) -> dict[str, Any]:
         """Wake a vehicle and wait until API or telemetry confirms readiness."""

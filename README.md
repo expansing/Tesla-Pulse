@@ -372,17 +372,29 @@ Tesla Pulse also exposes a **Vehicle Awake Status** diagnostic sensor. A vehicle
 
 Tesla Pulse requires Fleet Telemetry to wake and confirm a sleeping vehicle
 before sending a command. A command is sent directly when the vehicle has sent
-a recent vehicle telemetry frame, even if a later `DISCONNECTED` connectivity
-record reports a lost Wi-Fi or LTE link. Otherwise, it follows this sequence:
+recent telemetry and no later `DISCONNECTED` connectivity record reports a lost
+Wi-Fi or LTE link. Otherwise, it follows this sequence:
 
 1. Tesla Pulse records the current telemetry generation and sends a wake-up request.
-2. It waits for the next vehicle telemetry frame, confirming that the vehicle is awake.
+2. It waits for a `CONNECTED`/`ONLINE` record or vehicle telemetry frame, confirming that the vehicle is awake.
 3. The original command is sent only after that confirmation.
 
 While this sequence runs, Tesla Pulse disables controls for that vehicle and
 rejects additional commands for the same vehicle instead of queuing them. If no
 telemetry frame arrives within 90 seconds after wake-up, the command fails with
 an explicit timeout instead of being sent prematurely.
+
+After Tesla accepts a command with a deterministic result, Tesla Pulse updates
+the corresponding entity state immediately instead of making another Fleet API
+request. This includes locks, Sentry Mode, charge port, climate controls,
+temperature and charge-limit values, heaters, windows, and trunks. A later
+matching telemetry signal confirms that state; after a bounded confirmation
+window of 30 seconds, explicit telemetry can correct it. This allows a manual
+change made inside the vehicle to update Home Assistant promptly. The rear trunk
+remains telemetry-only because Tesla exposes it as a toggle rather than an
+explicit open/close command. Transient or conditional actions such as horn,
+lights, navigation, charging transitions, and media controls remain
+telemetry-only.
 
 Advanced rear-left and rear-right powertrain diagnostics are disabled by default because many vehicles do not expose those channels. Tesla Pulse also evaluates explicit optional telemetry groups across completed awake sessions. After at least two sessions containing three or more vehicle telemetry frames without a valid group signal, it disables the corresponding REL/RER or Powershare entities. A valid signal re-enables only entities that Tesla Pulse disabled itself; manually disabled entities are unchanged. Tonneau, sunroof, and rear-display HVAC capability observations are retained for future entity support, but have no current entity to enable or disable. Tesla `<INVALID>` values are not used as evidence of absent hardware.
 
