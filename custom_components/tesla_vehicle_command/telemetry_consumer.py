@@ -532,7 +532,7 @@ class TelemetryConsumer:
         response["vehicle_state"]["connectivity_status"] = status
         self.coordinator.set_connectivity_status(vin, status)
 
-        if status.upper() in {"CONNECTED", "ONLINE"}:
+        if status == "CONNECTED":
             _LOGGER.info("Vehicle %s connected via telemetry", vin)
 
     @classmethod
