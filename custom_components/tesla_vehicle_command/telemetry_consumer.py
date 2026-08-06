@@ -452,12 +452,17 @@ class TelemetryConsumer:
         processed_fields: set[str] = set()
         for signal_name, targets in signal_mapping.items():
             if signal_name in signals:
+                value = signals[signal_name]
+                if value is None:
+                    continue
+                updated_state = False
                 for state_category, state_key, transform in targets:
-                    value = signals[signal_name]
                     converted_value = transform(value) if transform else value
                     if converted_value is not None:
                         response[state_category][state_key] = converted_value
-                processed_fields.add(signal_name)
+                        updated_state = True
+                if updated_state:
+                    processed_fields.add(signal_name)
 
         received_fields = set(signals)
         self._apply_charging_composites(
@@ -629,6 +634,7 @@ class TelemetryConsumer:
             if telemetry_key in doors:
                 # Convert 0/1 to "Closed"/"Open" for ENUM sensors
                 vehicle_state[state_key] = "Open" if cls._is_truthy(doors[telemetry_key]) else "Closed"
+                processed_fields.add(f"DoorState.{telemetry_key}")
         processed_fields.add("DoorState")
 
     @staticmethod
@@ -669,10 +675,13 @@ class TelemetryConsumer:
     @staticmethod
     def _to_float(value: Any) -> float | None:
         """Convert telemetry numeric values to float fields."""
-        try:
-            return float(value)
-        except (TypeError, ValueError):
+        if isinstance(value, bool):
             return None
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return numeric_value if math.isfinite(numeric_value) else None
 
     @staticmethod
     def _axle_speed_to_kmh(value: Any) -> float | None:
@@ -686,14 +695,6 @@ class TelemetryConsumer:
             rpm = float(value)
             # Typical Tesla tire circumference ~2.1m
             return round(rpm * 2.1 * 60 / 1000, 1)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _to_float(value: Any) -> float | None:
-        """Convert telemetry numeric values to float fields."""
-        try:
-            return float(value)
         except (TypeError, ValueError):
             return None
 
