@@ -464,7 +464,7 @@ Tesla Pulse estimates current usable battery capacity from `Soc` and `EnergyRema
 #### How the calculation works
 
 1. **Start a window.** Tesla Pulse saves a same-record pair of SOC and remaining energy, such as 90% and 58.5 kWh, and notes whether the pack is charging or discharging.
-2. **Follow the whole run.** The window stays open for the entire same-direction run, not just the first 20 SOC points. Small opposite steps (for example, brief regen while driving) are treated as noise using hysteresis: a single reversal within 1 SOC point is ignored, and a real reversal must persist for two samples. The window closes when a sustained reversal occurs or when telemetry is silent for more than six hours.
+2. **Follow the whole run.** The window stays open for the entire same-direction run, not just the first 20 SOC points. Small opposite steps (for example, brief regen while driving) are treated as noise using hysteresis: a single reversal within 1 SOC point is ignored, and the run ends after two consecutive small reversals or any larger reversal. The window also closes when telemetry is silent for more than six hours.
 3. **Accept the window if it is long enough.** When a window closes, Tesla Pulse keeps it only if the SOC moved at least 20 percentage points. It then divides the energy change by the SOC change and scales to 100%:
 
   $$
