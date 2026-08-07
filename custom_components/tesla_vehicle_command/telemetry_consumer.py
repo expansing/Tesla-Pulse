@@ -179,6 +179,7 @@ class TelemetryConsumer:
             received_fields,
             processed_fields,
             self._last_signals_by_vin.get(vin) if actual_topic == "V" else None,
+            self._parse_record_timestamp(data) if actual_topic == "V" else None,
         )
 
     async def _process_vehicle_signals(

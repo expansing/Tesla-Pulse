@@ -286,6 +286,12 @@ _BATTERY_CAPACITY_REVERSAL_TOLERANCE_PCT = 1.0
 _BATTERY_CAPACITY_REVERSAL_STREAK_LIMIT = 2
 _BATTERY_CAPACITY_OUTLIER_DEVIATION_PCT = 35.0
 _BATTERY_CAPACITY_MAX_REJECTED = 12
+_BATTERY_CAPACITY_MODEL_VERSION = 3
+_BATTERY_HIGH_SOC_MIN_PERCENT = 95.0
+_BATTERY_HIGH_SOC_MAX_OBSERVATIONS = 12
+_BATTERY_HIGH_SOC_WARNING_DEVIATION_PCT = 10.0
+_BATTERY_SNAPSHOT_MAX_DAYS = 400
+_TELEMETRY_DIAGNOSTIC_COUNTER_MAX = 10_000
 _BATTERY_HISTORY_LOOKBACK = timedelta(days=30)
 _BATTERY_HISTORY_PAIR_TOLERANCE = timedelta(seconds=2)
 _BATTERY_HISTORY_RETRY_INTERVAL = timedelta(days=1)
@@ -403,6 +409,42 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Set the callback used to apply optional entity capability decisions."""
         self._capability_listener = listener
 
+    def get_capability_diagnostics(self, vin: str) -> dict[str, list[str]]:
+        """Return explainable optional-feature capability states for one vehicle."""
+        capabilities = self._signal_capabilities.get(vin, {})
+        observed = self._capability_valid_signals.get(vin, set())
+        supported: list[str] = []
+        unsupported: list[str] = []
+        not_yet_observed: list[str] = []
+        for group_name, signals in _OPTIONAL_CAPABILITY_GROUPS.items():
+            if capabilities.get(group_name, {}).get("auto_disabled"):
+                unsupported.append(group_name)
+            elif observed.intersection(signals):
+                supported.append(group_name)
+            else:
+                not_yet_observed.append(group_name)
+        return {
+            "supported": sorted(supported),
+            "unsupported": sorted(unsupported),
+            "not_yet_observed": sorted(not_yet_observed),
+        }
+
+    def rescan_capabilities(self, vin: str) -> None:
+        """Clear auto-disabled capability conclusions and begin a new observation run."""
+        capabilities = self._signal_capabilities.setdefault(vin, {})
+        reenabled = {
+            group_name
+            for group_name, capability in capabilities.items()
+            if capability.get("auto_disabled")
+        }
+        self._signal_capabilities[vin] = {}
+        self._capability_valid_signals.pop(vin, None)
+        self._capability_frame_counts.pop(vin, None)
+        if reenabled and self._capability_listener:
+            self._capability_listener(vin, set(), reenabled)
+        self._telemetry_store.async_delay_save(self._telemetry_store_payload, 30)
+        self.async_update_listeners()
+
     def record_telemetry_signal_values(
         self, vin: str, signals: dict[str, Any]
     ) -> None:
@@ -441,16 +483,34 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         vin: str,
         received_fields: set[str],
         processed_fields: set[str],
+        vehicle_capture_at: datetime | None = None,
     ) -> None:
         """Record a successfully processed telemetry message for a vehicle."""
+        received_at = datetime.now(timezone.utc)
         metadata = self._telemetry_metadata.get(vin, {})
-        self._telemetry_metadata[vin] = {
+        updated_metadata = {
             **metadata,
-            "last_received": datetime.now().astimezone(),
+            "last_received": received_at,
             "connectivity_status": "ONLINE",
             "received_fields": sorted(received_fields),
             "processed_fields": sorted(processed_fields),
         }
+        if received_fields - processed_fields:
+            updated_metadata["partial_frame_count"] = min(
+                int(metadata.get("partial_frame_count", 0)) + 1,
+                _TELEMETRY_DIAGNOSTIC_COUNTER_MAX,
+            )
+        updated_metadata["frame_count"] = min(
+            int(metadata.get("frame_count", 0)) + 1,
+            _TELEMETRY_DIAGNOSTIC_COUNTER_MAX,
+        )
+        if vehicle_capture_at is not None and vehicle_capture_at.tzinfo is not None:
+            capture_at = vehicle_capture_at.astimezone(timezone.utc)
+            updated_metadata["last_vehicle_capture"] = capture_at
+            updated_metadata["transport_delay_seconds"] = round(
+                max(0.0, (received_at - capture_at).total_seconds()), 3
+            )
+        self._telemetry_metadata[vin] = updated_metadata
         self._telemetry_generations[vin] = (
             self._telemetry_generations.get(vin, 0) + 1
         )
@@ -640,7 +700,20 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return telemetry health and diagnostic metadata for a vehicle."""
         metadata = self._telemetry_metadata.get(vin, {})
         last_received = metadata.get("last_received")
-        if last_received and datetime.now().astimezone() - last_received <= timedelta(
+        processed_fields = set(metadata.get("processed_fields", []))
+        has_partial_battery_data = bool(
+            {"Soc", "EnergyRemaining"}.intersection(processed_fields)
+            and not {"Soc", "EnergyRemaining"}.issubset(processed_fields)
+        )
+        if not self._telemetry_receiver_available:
+            state = "receiver_unavailable"
+        elif metadata.get("registration_status") == "failed":
+            state = "registration_failed"
+        elif last_received and datetime.now(timezone.utc) - last_received <= timedelta(
+            minutes=15
+        ) and has_partial_battery_data:
+            state = "partial_battery_data"
+        elif last_received and datetime.now(timezone.utc) - last_received <= timedelta(
             minutes=15
         ):
             state = "receiving"
@@ -648,10 +721,52 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             state = "stale"
         elif self._telemetry_receiver_available:
             state = "waiting"
-        else:
-            state = "unavailable"
 
         return {"state": state, **metadata}
+
+    def get_telemetry_setup_validation(self, vin: str) -> dict[str, Any]:
+        """Return sanitized Fleet Telemetry setup checks for one vehicle."""
+        if self.get_vehicle_config(vin) is None:
+            raise ValueError("Vehicle is not configured")
+
+        hostname = self.entry.options.get(CONF_TELEMETRY_HOSTNAME, "").strip()
+        port = self.entry.options.get(CONF_TELEMETRY_PORT)
+        try:
+            port_is_valid = 1 <= int(port) <= 65535
+        except (TypeError, ValueError):
+            port_is_valid = False
+
+        certificate_path = self.proxy_manager.telemetry_ca_path
+        metadata = self._telemetry_metadata.get(vin, {})
+        last_received = metadata.get("last_received")
+        registration_status = metadata.get("registration_status", "not_attempted")
+
+        return {
+            "receiver": (
+                "available" if self._telemetry_receiver_available else "unavailable"
+            ),
+            "hostname": "configured" if hostname else "missing",
+            "port": "configured" if port_is_valid else "missing_or_invalid",
+            "certificate": (
+                "available"
+                if certificate_path is not None and certificate_path.is_file()
+                else "missing"
+            ),
+            "registration": registration_status,
+            "vehicle_frame": (
+                "received" if isinstance(last_received, datetime) else "not_received"
+            ),
+        }
+
+    def validate_telemetry_setup(self, vin: str) -> dict[str, Any]:
+        """Publish a timestamped result for an explicit validation action."""
+        result = self.get_telemetry_setup_validation(vin)
+        self._telemetry_metadata.setdefault(vin, {})["last_validation"] = (
+            datetime.now(timezone.utc)
+        )
+        self._telemetry_store.async_delay_save(self._telemetry_store_payload, 30)
+        self.async_update_listeners()
+        return result
 
     @staticmethod
     def _empty_response() -> dict[str, dict[str, Any]]:
@@ -697,21 +812,34 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for vin, metadata in stored_cache.get("metadata", {}).items():
             if vin not in data or not isinstance(metadata, dict):
                 continue
+            restored_metadata = dict(metadata)
             last_received = metadata.get("last_received")
             if isinstance(last_received, str):
                 try:
                     last_received = datetime.fromisoformat(last_received)
                 except ValueError:
-                    continue
+                    last_received = None
             if isinstance(last_received, datetime):
-                self._telemetry_metadata[vin] = {
-                    "last_received": last_received,
-                    "received_fields": metadata.get("received_fields", []),
-                    "processed_fields": metadata.get("processed_fields", []),
-                    "connectivity_status": metadata.get("connectivity_status"),
-                }
+                restored_metadata["last_received"] = last_received
+                self._telemetry_metadata[vin] = restored_metadata
                 if self.is_vehicle_awake(vin):
                     self._schedule_sleep_transition(vin)
+            else:
+                restored_metadata.pop("last_received", None)
+            for timestamp_key in (
+                "last_registration",
+                "last_validation",
+                "last_vehicle_capture",
+            ):
+                timestamp = restored_metadata.get(timestamp_key)
+                if isinstance(timestamp, str):
+                    try:
+                        restored_metadata[timestamp_key] = datetime.fromisoformat(
+                            timestamp
+                        )
+                    except ValueError:
+                        restored_metadata.pop(timestamp_key, None)
+            self._telemetry_metadata[vin] = restored_metadata
 
         raw_signals = stored_cache.get("raw_signals", {})
         if isinstance(raw_signals, dict):
@@ -755,14 +883,27 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _telemetry_store_payload(self) -> dict[str, Any]:
         """Serialize telemetry state and diagnostics for local storage."""
-        metadata = {
-            vin: {
-                **details,
-                "last_received": details["last_received"].isoformat(),
-            }
-            for vin, details in self._telemetry_metadata.items()
-            if isinstance(details.get("last_received"), datetime)
-        }
+        metadata: dict[str, dict[str, Any]] = {}
+        for vin, details in self._telemetry_metadata.items():
+            serialized = dict(details)
+            for timestamp_key in (
+                "last_received",
+                "last_registration",
+                "last_validation",
+                "last_vehicle_capture",
+            ):
+                timestamp = serialized.get(timestamp_key)
+                if isinstance(timestamp, datetime):
+                    serialized[timestamp_key] = timestamp.isoformat()
+            audit = serialized.get("command_audit")
+            if isinstance(audit, dict):
+                serialized_audit = dict(audit)
+                for timestamp_key in ("dispatch_time", "confirmation_time"):
+                    timestamp = serialized_audit.get(timestamp_key)
+                    if isinstance(timestamp, datetime):
+                        serialized_audit[timestamp_key] = timestamp.isoformat()
+                serialized["command_audit"] = serialized_audit
+            metadata[vin] = serialized
         return {
             "vehicles": self.data if isinstance(self.data, dict) else {},
             "metadata": metadata,
@@ -806,6 +947,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         normalized_source = "recorder" if source == "recorder" else "live"
 
         model = self._battery_capacity_models.setdefault(vin, {})
+        if sample["soc"] >= _BATTERY_HIGH_SOC_MIN_PERCENT:
+            self._record_high_soc_observation(model, sample, normalized_source)
         active = model.get("active_window")
         if not isinstance(active, dict):
             model["active_window"] = self._new_active_window(sample, normalized_source)
@@ -896,6 +1039,38 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._finalize_or_discard_window(vin, active)
         model["active_window"] = None
 
+    def reset_battery_capacity_history(self, vin: str, scope: str = "all") -> None:
+        """Discard selected persisted estimator evidence for a vehicle."""
+        if scope not in {"all", "live", "recorder"}:
+            raise ValueError("Battery history reset scope must be all, live, or recorder")
+
+        model = self._battery_capacity_models.setdefault(
+            vin, {"model_version": _BATTERY_CAPACITY_MODEL_VERSION}
+        )
+        for key in ("accepted_windows", "rejected_windows"):
+            windows = model.get(key)
+            if not isinstance(windows, list):
+                model[key] = []
+                continue
+            if scope == "all":
+                model[key] = []
+            else:
+                model[key] = [
+                    window
+                    for window in windows
+                    if not isinstance(window, dict) or window.get("source") != scope
+                ]
+
+        active = model.get("active_window")
+        if scope == "all" or (
+            isinstance(active, dict) and active.get("source") == scope
+        ):
+            model["active_window"] = None
+        model["last_reset_scope"] = scope
+        model["last_reset"] = datetime.now(timezone.utc).isoformat()
+        self._telemetry_store.async_delay_save(self._telemetry_store_payload, 30)
+        self.async_update_listeners()
+
     def _finalize_or_discard_window(
         self, vin: str, active: dict[str, Any]
     ) -> None:
@@ -982,6 +1157,26 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         rejected.sort(key=lambda item: item.get("end_time") or "", reverse=True)
         model["rejected_windows"] = rejected[:_BATTERY_CAPACITY_MAX_REJECTED]
 
+    @staticmethod
+    def _record_high_soc_observation(
+        model: dict[str, Any], sample: dict[str, Any], source: str
+    ) -> None:
+        """Retain a bounded high-SOC comparison observation for diagnostics."""
+        capacity_kwh = sample["energy"] / sample["soc"] * 100
+        observations = model.get("high_soc_observations")
+        observations = list(observations) if isinstance(observations, list) else []
+        observations.append(
+            {
+                "soc": round(sample["soc"], 3),
+                "energy": round(sample["energy"], 3),
+                "capacity_kwh": round(capacity_kwh, 3),
+                "timestamp": sample["timestamp"],
+                "source": source,
+            }
+        )
+        observations.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
+        model["high_soc_observations"] = observations[:_BATTERY_HIGH_SOC_MAX_OBSERVATIONS]
+
     @classmethod
     def _valid_accepted_windows(
         cls, model: dict[str, Any]
@@ -1064,21 +1259,92 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         return metrics
 
+    def _record_daily_battery_snapshot(self, vin: str) -> None:
+        """Persist one bounded daily snapshot when a valid estimate exists."""
+        metrics = self._battery_capacity_metrics(vin)
+        capacity = metrics.get("estimated_usable_capacity")
+        if capacity is None:
+            return
+        model = self._battery_capacity_models.setdefault(vin, {})
+        day = datetime.now(timezone.utc).date().isoformat()
+        snapshots = model.get("daily_snapshots")
+        snapshots = list(snapshots) if isinstance(snapshots, list) else []
+        snapshot = {
+            "date": day,
+            "usable_capacity_kwh": capacity,
+            "soh_percent": metrics.get("estimated_battery_soh"),
+            "confidence": metrics.get("battery_soh_confidence"),
+        }
+        snapshots = [item for item in snapshots if item.get("date") != day]
+        snapshots.append(snapshot)
+        snapshots.sort(key=lambda item: item.get("date") or "", reverse=True)
+        model["daily_snapshots"] = snapshots[:_BATTERY_SNAPSHOT_MAX_DAYS]
+
     def get_battery_capacity_diagnostics(self, vin: str) -> dict[str, Any]:
         """Return accepted capacity windows and data-quality indicators."""
         model = self._battery_capacity_models.get(vin, {})
         windows = self._valid_accepted_windows(model)
         rejected = model.get("rejected_windows")
-        rejected_count = len(rejected) if isinstance(rejected, list) else 0
+        rejected_windows = [
+            window for window in rejected if isinstance(window, dict)
+        ] if isinstance(rejected, list) else []
+        rejected_count = len(rejected_windows)
+        accepted_source_counts = {
+            source: sum(window.get("source") == source for window in windows)
+            for source in ("live", "recorder")
+        }
+        rejected_source_counts = {
+            source: sum(window.get("source") == source for window in rejected_windows)
+            for source in ("live", "recorder")
+        }
         if not windows:
             return {
                 "accepted_window_count": 0,
                 "accepted_windows": [],
+                "accepted_window_sources": accepted_source_counts,
                 "rejected_window_count": rejected_count,
+                "rejected_window_sources": rejected_source_counts,
+                "rejected_windows": [
+                    {
+                        "capacity_kwh": window.get("capacity_kwh"),
+                        "delta_soc": window.get("delta_soc"),
+                        "end_time": window.get("end_time"),
+                        "source": window.get("source", "unknown"),
+                        "rejection_reason": window.get("rejection_reason"),
+                    }
+                    for window in rejected_windows
+                ],
             }
 
         capacities = [float(window["capacity_kwh"]) for window in windows]
         estimate = self._weighted_median_capacity(windows)
+        observations = model.get("high_soc_observations")
+        high_soc_capacities = [
+            float(observation["capacity_kwh"])
+            for observation in observations
+            if isinstance(observation, dict)
+            and self._is_finite_number(observation.get("capacity_kwh"))
+        ] if isinstance(observations, list) else []
+        high_soc_median = median(high_soc_capacities) if high_soc_capacities else None
+        high_soc_deviation = (
+            abs(high_soc_median - estimate) / estimate * 100
+            if high_soc_median is not None and estimate not in (None, 0)
+            else None
+        )
+        snapshots = model.get("daily_snapshots")
+        recent_snapshots = [
+            snapshot for snapshot in snapshots if isinstance(snapshot, dict)
+        ][:30] if isinstance(snapshots, list) else []
+        trend_change_kwh = None
+        if len(recent_snapshots) >= 2:
+            newest_capacity = recent_snapshots[0].get("usable_capacity_kwh")
+            oldest_capacity = recent_snapshots[-1].get("usable_capacity_kwh")
+            if self._is_finite_number(newest_capacity) and self._is_finite_number(
+                oldest_capacity
+            ):
+                trend_change_kwh = round(
+                    float(newest_capacity) - float(oldest_capacity), 3
+                )
         newest_end = max(
             (window.get("end_time") for window in windows if window.get("end_time")),
             default=None,
@@ -1113,6 +1379,22 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return {
             "accepted_window_count": len(windows),
             "accepted_windows": detail,
+            "accepted_window_sources": accepted_source_counts,
+            "accepted_capacity_min_kwh": round(min(capacities), 3),
+            "accepted_capacity_max_kwh": round(max(capacities), 3),
+            "high_soc_observation_count": len(high_soc_capacities),
+            "high_soc_comparison_capacity_kwh": (
+                round(high_soc_median, 3) if high_soc_median is not None else None
+            ),
+            "high_soc_deviation_percent": (
+                round(high_soc_deviation, 2) if high_soc_deviation is not None else None
+            ),
+            "high_soc_discrepancy_warning": bool(
+                high_soc_deviation is not None
+                and high_soc_deviation > _BATTERY_HIGH_SOC_WARNING_DEVIATION_PCT
+            ),
+            "daily_snapshots_30d": recent_snapshots,
+            "daily_snapshot_change_30d_kwh": trend_change_kwh,
             "newest_window_age_hours": newest_age_hours,
             "median_absolute_deviation_kwh": (
                 round(self._median_absolute_deviation(capacities, float(estimate)), 3)
@@ -1120,6 +1402,17 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else None
             ),
             "rejected_window_count": rejected_count,
+            "rejected_window_sources": rejected_source_counts,
+            "rejected_windows": [
+                {
+                    "capacity_kwh": window.get("capacity_kwh"),
+                    "delta_soc": window.get("delta_soc"),
+                    "end_time": window.get("end_time"),
+                    "source": window.get("source", "unknown"),
+                    "rejection_reason": window.get("rejection_reason"),
+                }
+                for window in rejected_windows
+            ],
         }
 
     def get_battery_soh_diagnostics(self, vin: str) -> dict[str, Any]:
@@ -1148,14 +1441,15 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _migrate_battery_capacity_model(
         self, model: dict[str, Any]
     ) -> dict[str, Any]:
-        """Convert legacy 'estimates' entries into accepted-window records."""
+        """Migrate persisted battery-estimator state to the current schema."""
         if not isinstance(model, dict):
             return {}
-        if isinstance(model.get("accepted_windows"), list):
-            return model
-        legacy = model.get("estimates")
         accepted: list[dict[str, Any]] = []
-        if isinstance(legacy, list):
+        existing_accepted = model.get("accepted_windows")
+        if isinstance(existing_accepted, list):
+            accepted = [window for window in existing_accepted if isinstance(window, dict)]
+        elif isinstance(model.get("estimates"), list):
+            legacy = model["estimates"]
             for estimate in legacy:
                 if not isinstance(estimate, dict):
                     continue
@@ -1193,6 +1487,31 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if key not in ("estimates", "anchor", "last_sample", "direction")
         }
         migrated["accepted_windows"] = accepted[-_BATTERY_CAPACITY_MAX_ESTIMATES:]
+        rejected = migrated.get("rejected_windows")
+        migrated["rejected_windows"] = (
+            [window for window in rejected if isinstance(window, dict)][
+                -_BATTERY_CAPACITY_MAX_REJECTED:
+            ]
+            if isinstance(rejected, list)
+            else []
+        )
+        observations = migrated.get("high_soc_observations")
+        migrated["high_soc_observations"] = (
+            [item for item in observations if isinstance(item, dict)][
+                -_BATTERY_HIGH_SOC_MAX_OBSERVATIONS:
+            ]
+            if isinstance(observations, list)
+            else []
+        )
+        snapshots = migrated.get("daily_snapshots")
+        migrated["daily_snapshots"] = (
+            [item for item in snapshots if isinstance(item, dict)][
+                -_BATTERY_SNAPSHOT_MAX_DAYS:
+            ]
+            if isinstance(snapshots, list)
+            else []
+        )
+        migrated["model_version"] = _BATTERY_CAPACITY_MODEL_VERSION
         return migrated
 
     async def async_import_battery_history(self) -> None:
@@ -1363,10 +1682,13 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         received_fields: set[str] | None = None,
         processed_fields: set[str] | None = None,
         raw_signals: dict[str, Any] | None = None,
+        vehicle_capture_at: datetime | None = None,
     ) -> None:
         """Publish and persist state sourced exclusively from telemetry."""
         if received_fields is not None and processed_fields is not None:
-            self.record_telemetry_update(vin, received_fields, processed_fields)
+            self.record_telemetry_update(
+                vin, received_fields, processed_fields, vehicle_capture_at
+            )
         if raw_signals is not None:
             self._telemetry_raw_signals[vin] = dict(raw_signals)
 
@@ -1378,6 +1700,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         updated_data = dict(self.data or self._empty_telemetry_data())
         updated_data[vin] = {"response": processed_response}
         self.async_set_updated_data(updated_data)
+        self._record_daily_battery_snapshot(vin)
         self._telemetry_store.async_delay_save(
             self._telemetry_store_payload, 30
         )
@@ -1429,6 +1752,15 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
             if section.get(key) == expected:
                 self._pending_command_states.pop(pending_key, None)
+                audit = self._telemetry_metadata.setdefault(vin, {}).get("command_audit")
+                if isinstance(audit, dict):
+                    confirmed_at = datetime.now(timezone.utc)
+                    audit["confirmation_time"] = confirmed_at
+                    dispatched_at = audit.get("dispatch_time")
+                    if isinstance(dispatched_at, datetime):
+                        audit["confirmation_latency_seconds"] = round(
+                            (confirmed_at - dispatched_at).total_seconds(), 3
+                        )
             else:
                 section[key] = expected
 
@@ -1441,6 +1773,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> dict[str, Any]:
         """Validate a command response and publish its deterministic outcome."""
         validated_response = self._validate_command_response(response)
+        audit = self._telemetry_metadata.setdefault(vin, {}).get("command_audit")
+        if isinstance(audit, dict):
+            audit["response_status"] = "accepted"
         updates = self._command_state_updates(command, body)
         if updates:
             self._publish_command_state(vin, updates)
@@ -1746,11 +2081,22 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Send a command to the vehicle."""
+        self._telemetry_metadata.setdefault(vin, {})["command_audit"] = {
+            "command": command,
+            "dispatch_time": datetime.now(timezone.utc),
+            "response_status": "in_progress",
+        }
         self._acquire_command_slot(vin)
         try:
             lock = self._command_locks.setdefault(vin, asyncio.Lock())
             async with lock:
                 return await self._async_send_command(vin, command, body)
+        except Exception as err:
+            audit = self._telemetry_metadata.setdefault(vin, {}).get("command_audit")
+            if isinstance(audit, dict):
+                audit["response_status"] = "failed"
+                audit["failure_category"] = type(err).__name__
+            raise
         finally:
             self._release_command_slot(vin)
 
@@ -1884,20 +2230,27 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_configure_fleet_telemetry(self, vin: str) -> dict[str, Any]:
         """Register a Fleet Telemetry destination through the command proxy."""
         if not self.proxy_manager.is_running:
+            self._record_telemetry_registration_result(vin, "failed")
             raise RuntimeError("Proxy not running")
 
         hostname = self.entry.options.get(CONF_TELEMETRY_HOSTNAME, "").strip()
         port = self.entry.options.get(CONF_TELEMETRY_PORT)
         ca_path = self.proxy_manager.telemetry_ca_path
         if not hostname or not port or not ca_path or not ca_path.is_file():
+            self._record_telemetry_registration_result(vin, "failed")
             raise RuntimeError(
                 "Configure a telemetry hostname and restart the integration first"
             )
 
-        await self._ensure_valid_token()
-        telemetry_ca = await self.hass.async_add_executor_job(ca_path.read_text)
+        try:
+            await self._ensure_valid_token()
+            telemetry_ca = await self.hass.async_add_executor_job(ca_path.read_text)
+            ssl_context = await self._get_ssl_context()
+        except Exception:
+            self._record_telemetry_registration_result(vin, "failed")
+            raise
+
         session = async_get_clientsession(self.hass)
-        ssl_context = await self._get_ssl_context()
         headers = {
             "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
@@ -1912,19 +2265,35 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             },
         }
         url = f"https://{PROXY_HOST}:{PROXY_PORT}{API_FLEET_TELEMETRY_CONFIG}"
-        async with session.post(
-            url,
-            headers=headers,
-            json=body,
-            ssl=ssl_context,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as response:
-            if response.status != 200:
-                text = await response.text()
-                raise RuntimeError(
-                    f"Fleet Telemetry configuration failed: {response.status} - {text}"
-                )
-            return await response.json()
+        try:
+            async with session.post(
+                url,
+                headers=headers,
+                json=body,
+                ssl=ssl_context,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    raise RuntimeError(
+                        "Fleet Telemetry configuration failed: "
+                        f"{response.status} - {text}"
+                    )
+                result = await response.json()
+        except Exception:
+            self._record_telemetry_registration_result(vin, "failed")
+            raise
+
+        self._record_telemetry_registration_result(vin, "registered")
+        return result
+
+    def _record_telemetry_registration_result(self, vin: str, status: str) -> None:
+        """Persist a non-sensitive Fleet Telemetry registration outcome."""
+        metadata = self._telemetry_metadata.setdefault(vin, {})
+        metadata["registration_status"] = status
+        metadata["last_registration"] = datetime.now(timezone.utc)
+        self._telemetry_store.async_delay_save(self._telemetry_store_payload, 30)
+        self.async_update_listeners()
 
     def get_vehicle_config(self, vin: str) -> dict[str, Any] | None:
         """Get vehicle configuration."""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -1568,14 +1569,32 @@ class TeslaTelemetryStatusSensor(TeslaVehicleCommandEntity, SensorEntity):
         """Return the most recent telemetry record diagnostics."""
         metadata = self.coordinator.get_telemetry_status(self.vin)
         last_received = metadata.get("last_received")
+        last_vehicle_capture = metadata.get("last_vehicle_capture")
+        last_validation = metadata.get("last_validation")
         return {
             "last_received": last_received.isoformat() if last_received else None,
+            "last_vehicle_capture": (
+                last_vehicle_capture.isoformat()
+                if isinstance(last_vehicle_capture, datetime)
+                else None
+            ),
+            "transport_delay_seconds": metadata.get("transport_delay_seconds"),
+            "frame_count": metadata.get("frame_count", 0),
+            "partial_frame_count": metadata.get("partial_frame_count", 0),
+            "last_validation": (
+                last_validation.isoformat()
+                if isinstance(last_validation, datetime)
+                else None
+            ),
             "connectivity_status": metadata.get("connectivity_status"),
             "received_fields": metadata.get("received_fields", []),
             "processed_fields": metadata.get("processed_fields", []),
             "unprocessed_fields": sorted(
                 set(metadata.get("received_fields", []))
                 - set(metadata.get("processed_fields", []))
+            ),
+            "setup_validation": self.coordinator.get_telemetry_setup_validation(
+                self.vin
             ),
         }
 

@@ -114,6 +114,38 @@ configure_fleet_telemetry:
       selector:
         text:
 
+reset_battery_history:
+  name: Reset Battery Estimator History
+  description: Permanently discard selected accepted and rejected battery estimator windows for a vehicle.
+  fields:
+    vin:
+      name: Vehicle VIN
+      description: VIN of the vehicle whose estimator history will be reset.
+      required: true
+      selector:
+        text:
+    scope:
+      name: Evidence Source
+      description: Choose all estimator evidence, only live telemetry windows, or only Recorder-imported windows.
+      required: true
+      selector:
+        select:
+          options:
+            - all
+            - live
+            - recorder
+
+rescan_capabilities:
+  name: Rescan Vehicle Capabilities
+  description: Clear Tesla Pulse optional-feature conclusions and begin a new telemetry observation run.
+  fields:
+    vin:
+      name: Vehicle VIN
+      description: VIN of the vehicle whose optional feature capabilities will be rescanned.
+      required: true
+      selector:
+        text:
+
 set_valet_mode:
   name: Set Valet Mode
   description: Enable or disable valet mode
