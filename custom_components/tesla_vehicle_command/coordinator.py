@@ -430,7 +430,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     def rescan_capabilities(self, vin: str) -> None:
-        """Clear auto-disabled capability conclusions and begin a new observation run."""
+        """Clear all persisted capability state and begin a new observation run."""
         capabilities = self._signal_capabilities.setdefault(vin, {})
         reenabled = {
             group_name
