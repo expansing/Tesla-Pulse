@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import math
+from datetime import datetime
 from typing import Any
 
 import zmq
@@ -471,11 +472,25 @@ class TelemetryConsumer:
             energy_remaining_kwh = self._to_float(
                 signals.get("EnergyRemaining")
             )
+            module_temps = [
+                temp
+                for temp in (
+                    self._to_float(signals.get("ModuleTempMax")),
+                    self._to_float(signals.get("ModuleTempMin")),
+                )
+                if temp is not None
+            ]
+            temperature_c = (
+                sum(module_temps) / len(module_temps) if module_temps else None
+            )
             charge_state.update(
                 self.coordinator.record_battery_capacity_sample(
                     vin,
                     soc_percent,
                     energy_remaining_kwh,
+                    observed_at=self._parse_record_timestamp(data),
+                    source="live",
+                    temperature_c=temperature_c,
                 )
             )
         self._apply_charging_composites(
@@ -509,6 +524,21 @@ class TelemetryConsumer:
             if isinstance(key, str):
                 signals[key] = TelemetryConsumer._unwrap_value(item.get("value"))
         return signals
+
+    @staticmethod
+    def _parse_record_timestamp(data: dict[str, Any]) -> datetime | None:
+        """Return the record's capture time, if it is timezone-aware."""
+        raw = data.get("createdAt")
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        text = raw.strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else None
 
     @staticmethod
     def _unwrap_value(value: Any) -> Any:

@@ -281,6 +281,11 @@ _BATTERY_CAPACITY_MAX_SESSION_GAP = timedelta(hours=6)
 _BATTERY_CAPACITY_MIN_KWH = 10.0
 _BATTERY_CAPACITY_MAX_KWH = 200.0
 _BATTERY_CAPACITY_MAX_ESTIMATES = 12
+_BATTERY_CAPACITY_SOC_EPSILON = 0.05
+_BATTERY_CAPACITY_REVERSAL_TOLERANCE_PCT = 1.0
+_BATTERY_CAPACITY_REVERSAL_STREAK_LIMIT = 2
+_BATTERY_CAPACITY_OUTLIER_DEVIATION_PCT = 35.0
+_BATTERY_CAPACITY_MAX_REJECTED = 12
 _BATTERY_HISTORY_LOOKBACK = timedelta(days=30)
 _BATTERY_HISTORY_PAIR_TOLERANCE = timedelta(seconds=2)
 _BATTERY_HISTORY_RETRY_INTERVAL = timedelta(days=1)
@@ -725,7 +730,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         battery_capacity_models = stored_cache.get("battery_capacity_models", {})
         if isinstance(battery_capacity_models, dict):
             self._battery_capacity_models = {
-                vin: model
+                vin: self._migrate_battery_capacity_model(model)
                 for vin, model in battery_capacity_models.items()
                 if vin in data and isinstance(model, dict)
             }
@@ -772,188 +777,423 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         soc_percent: Any,
         energy_remaining_kwh: Any,
         observed_at: datetime | None = None,
-        source: str = "telemetry",
+        source: str = "live",
+        temperature_c: Any = None,
     ) -> dict[str, Any]:
-        """Estimate usable battery capacity from a same-record SOC/energy pair."""
+        """Feed one same-record SOC/energy pair into the window state machine."""
         if (
             not self._is_finite_number(soc_percent)
             or not self._is_finite_number(energy_remaining_kwh)
             or not 0 <= soc_percent <= 100
             or energy_remaining_kwh < 0
         ):
-            return {}
+            return self._battery_capacity_metrics(vin)
 
-        now = observed_at or datetime.now().astimezone()
+        now = observed_at or datetime.now(timezone.utc)
         if now.tzinfo is None:
-            return {}
+            return self._battery_capacity_metrics(vin)
+        now = now.astimezone(timezone.utc)
+
+        temperature = (
+            float(temperature_c) if self._is_finite_number(temperature_c) else None
+        )
         sample = {
             "soc": float(soc_percent),
             "energy": float(energy_remaining_kwh),
             "timestamp": now.isoformat(),
+            "temperature": temperature,
         }
+        normalized_source = "recorder" if source == "recorder" else "live"
+
         model = self._battery_capacity_models.setdefault(vin, {})
-        anchor = model.get("anchor")
-        last_sample = model.get("last_sample")
-        previous_direction = model.get("direction")
-
-        if isinstance(last_sample, dict):
-            try:
-                last_timestamp = datetime.fromisoformat(last_sample["timestamp"])
-                if last_timestamp.tzinfo is None:
-                    raise ValueError("Battery sample timestamp has no timezone")
-                soc_step = sample["soc"] - float(last_sample["soc"])
-                energy_step = sample["energy"] - float(last_sample["energy"])
-            except (KeyError, TypeError, ValueError):
-                anchor = sample
-            else:
-                step_direction = 1 if soc_step > 0 else -1 if soc_step < 0 else 0
-                if (
-                    now - last_timestamp > _BATTERY_CAPACITY_MAX_SESSION_GAP
-                    or soc_step * energy_step < 0
-                    or (
-                        step_direction
-                        and previous_direction in (-1, 1)
-                        and step_direction != previous_direction
-                    )
-                ):
-                    anchor = sample
-                if step_direction and soc_step * energy_step > 0:
-                    model["direction"] = step_direction
-
-        if not isinstance(anchor, dict):
-            anchor = sample
+        active = model.get("active_window")
+        if not isinstance(active, dict):
+            model["active_window"] = self._new_active_window(sample, normalized_source)
+            return self._battery_capacity_metrics(vin)
 
         try:
-            soc_delta = sample["soc"] - float(anchor["soc"])
-            energy_delta = sample["energy"] - float(anchor["energy"])
+            last = active["last"]
+            last_timestamp = datetime.fromisoformat(last["timestamp"])
+            if last_timestamp.tzinfo is None:
+                raise ValueError("naive battery timestamp")
+            last_soc = float(last["soc"])
         except (KeyError, TypeError, ValueError):
-            soc_delta = 0.0
-            energy_delta = 0.0
-            anchor = sample
+            model["active_window"] = self._new_active_window(sample, normalized_source)
+            return self._battery_capacity_metrics(vin)
 
-        if (
-            abs(soc_delta) >= _BATTERY_CAPACITY_MIN_SOC_SPAN
-            and soc_delta * energy_delta > 0
-        ):
-            capacity_kwh = abs(energy_delta) * 100 / abs(soc_delta)
-            if _BATTERY_CAPACITY_MIN_KWH <= capacity_kwh <= _BATTERY_CAPACITY_MAX_KWH:
-                stored_estimates = model.get("estimates", [])
-                estimates = (
-                    list(stored_estimates)
-                    if isinstance(stored_estimates, list)
-                    else []
-                )
-                estimates.append(
-                    {
-                        "capacity_kwh": round(capacity_kwh, 3),
-                        "end_energy_kwh": round(sample["energy"], 3),
-                        "end_soc_percent": round(sample["soc"], 3),
-                        "end_timestamp": sample["timestamp"],
-                        "energy_delta_kwh": round(abs(energy_delta), 3),
-                        "soc_span": round(abs(soc_delta), 3),
-                        "source": source if source in {"recorder", "telemetry"} else "telemetry",
-                        "start_energy_kwh": round(float(anchor["energy"]), 3),
-                        "start_soc_percent": round(float(anchor["soc"]), 3),
-                        "start_timestamp": anchor["timestamp"],
-                    }
-                )
-                model["estimates"] = estimates[-_BATTERY_CAPACITY_MAX_ESTIMATES:]
-                anchor = sample
+        # A long silence ends the current same-direction run.
+        if now - last_timestamp > _BATTERY_CAPACITY_MAX_SESSION_GAP:
+            self._finalize_or_discard_window(vin, active)
+            model["active_window"] = self._new_active_window(sample, normalized_source)
+            return self._battery_capacity_metrics(vin)
 
-        model["anchor"] = anchor
-        model["last_sample"] = sample
+        soc_step = sample["soc"] - last_soc
+        if abs(soc_step) < _BATTERY_CAPACITY_SOC_EPSILON:
+            # No meaningful SOC change; keep the window open and advance time.
+            self._extend_active_window(active, sample)
+            return self._battery_capacity_metrics(vin)
+
+        step_direction = "charging" if soc_step > 0 else "discharging"
+        direction = active.get("direction")
+        if direction not in ("charging", "discharging"):
+            active["direction"] = step_direction
+            active["reversal_streak"] = 0
+            self._extend_active_window(active, sample)
+            return self._battery_capacity_metrics(vin)
+
+        if step_direction != direction:
+            if abs(soc_step) <= _BATTERY_CAPACITY_REVERSAL_TOLERANCE_PCT:
+                streak = int(active.get("reversal_streak", 0)) + 1
+                active["reversal_streak"] = streak
+                if streak < _BATTERY_CAPACITY_REVERSAL_STREAK_LIMIT:
+                    # Small opposite step (regen jitter); treat as noise, but advance time.
+                    active["last"]["timestamp"] = sample["timestamp"]
+                    temperature = sample.get("temperature")
+                    if temperature is not None:
+                        active["temp_sum"] = float(active.get("temp_sum", 0.0)) + float(temperature)
+                        active["temp_count"] = int(active.get("temp_count", 0)) + 1
+                    return self._battery_capacity_metrics(vin)
+            self._finalize_or_discard_window(vin, active)
+            model["active_window"] = self._new_active_window(sample, normalized_source)
+            return self._battery_capacity_metrics(vin)
+
+        active["reversal_streak"] = 0
+        self._extend_active_window(active, sample)
         return self._battery_capacity_metrics(vin)
 
-    def get_battery_capacity_diagnostics(self, vin: str) -> dict[str, Any]:
-        """Return accepted capacity windows suitable for a diagnostic sensor."""
-        model = self._battery_capacity_models.get(vin, {})
-        estimates = model.get("estimates", [])
-        if not isinstance(estimates, list):
-            return {"accepted_windows": [], "accepted_window_count": 0}
-
-        windows: list[dict[str, Any]] = []
-        for estimate in estimates:
-            if not isinstance(estimate, dict):
-                continue
-            capacity_kwh = estimate.get("capacity_kwh")
-            soc_span = estimate.get("soc_span")
-            if not (
-                self._is_finite_number(capacity_kwh)
-                and _BATTERY_CAPACITY_MIN_KWH <= capacity_kwh <= _BATTERY_CAPACITY_MAX_KWH
-                and self._is_finite_number(soc_span)
-                and _BATTERY_CAPACITY_MIN_SOC_SPAN <= soc_span <= 100
-            ):
-                continue
-            windows.append(
-                {
-                    "capacity_kwh": round(float(capacity_kwh), 3),
-                    "end_energy_kwh": estimate.get("end_energy_kwh"),
-                    "end_soc_percent": estimate.get("end_soc_percent"),
-                    "end_timestamp": estimate.get("end_timestamp"),
-                    "energy_delta_kwh": estimate.get("energy_delta_kwh"),
-                    "soc_span_percent": round(float(soc_span), 3),
-                    "source": estimate.get("source", "unknown"),
-                    "start_energy_kwh": estimate.get("start_energy_kwh"),
-                    "start_soc_percent": estimate.get("start_soc_percent"),
-                    "start_timestamp": estimate.get("start_timestamp"),
-                }
-            )
+    @staticmethod
+    def _new_active_window(sample: dict[str, Any], source: str) -> dict[str, Any]:
+        """Return a fresh active window anchored on a sample."""
+        temperature = sample.get("temperature")
         return {
-            "accepted_window_count": len(windows),
-            "accepted_windows": windows,
+            "start": dict(sample),
+            "last": dict(sample),
+            "direction": None,
+            "reversal_streak": 0,
+            "source": source,
+            "temp_sum": float(temperature) if temperature is not None else 0.0,
+            "temp_count": 1 if temperature is not None else 0,
         }
 
-    def _battery_capacity_metrics(self, vin: str) -> dict[str, Any]:
-        """Return capacity metrics derived from persisted estimates and options."""
-        model = self._battery_capacity_models.get(vin, {})
-        estimates = model.get("estimates", [])
-        if not isinstance(estimates, list):
-            return {}
-        capacities: list[float] = []
-        total_soc_span = 0.0
-        for estimate in estimates:
-            if not isinstance(estimate, dict):
-                continue
-            capacity = estimate.get("capacity_kwh")
-            soc_span = estimate.get("soc_span")
-            if (
-                isinstance(capacity, (int, float))
-                and not isinstance(capacity, bool)
-                and math.isfinite(capacity)
-                and _BATTERY_CAPACITY_MIN_KWH
-                <= capacity
-                <= _BATTERY_CAPACITY_MAX_KWH
-                and isinstance(soc_span, (int, float))
-                and not isinstance(soc_span, bool)
-                and math.isfinite(soc_span)
-                and _BATTERY_CAPACITY_MIN_SOC_SPAN <= soc_span <= 100
-            ):
-                capacities.append(float(capacity))
-                total_soc_span += float(soc_span)
-        if not capacities:
-            return {}
+    @staticmethod
+    def _extend_active_window(
+        active: dict[str, Any], sample: dict[str, Any]
+    ) -> None:
+        """Advance the active window's end with a new sample."""
+        active["last"] = dict(sample)
+        temperature = sample.get("temperature")
+        if temperature is not None:
+            active["temp_sum"] = float(active.get("temp_sum", 0.0)) + float(temperature)
+            active["temp_count"] = int(active.get("temp_count", 0)) + 1
 
-        estimated_capacity = round(float(median(capacities)), 2)
+    def flush_active_battery_window(self, vin: str) -> None:
+        """Close any open window so a completed run can be scored."""
+        model = self._battery_capacity_models.get(vin)
+        if not isinstance(model, dict):
+            return
+        active = model.get("active_window")
+        if isinstance(active, dict):
+            self._finalize_or_discard_window(vin, active)
+        model["active_window"] = None
+
+    def _finalize_or_discard_window(
+        self, vin: str, active: dict[str, Any]
+    ) -> None:
+        """Close an active window, storing it as accepted or rejected."""
+        try:
+            start = active["start"]
+            last = active["last"]
+            start_soc = float(start["soc"])
+            end_soc = float(last["soc"])
+            start_energy = float(start["energy"])
+            end_energy = float(last["energy"])
+        except (KeyError, TypeError, ValueError):
+            return
+
+        delta_soc = abs(end_soc - start_soc)
+        if delta_soc < _BATTERY_CAPACITY_MIN_SOC_SPAN:
+            return  # Not enough span; drop silently.
+
+        delta_energy = abs(end_energy - start_energy)
+        capacity_kwh = delta_energy / delta_soc * 100
+        direction = active.get("direction")
+        if direction not in ("charging", "discharging"):
+            direction = "charging" if end_soc >= start_soc else "discharging"
+        source = active.get("source")
+        source = source if source in ("live", "recorder") else "unknown"
+        temp_count = int(active.get("temp_count", 0))
+        temperature_c = (
+            round(float(active.get("temp_sum", 0.0)) / temp_count, 2)
+            if temp_count > 0
+            else None
+        )
+        window = {
+            "start_soc": round(start_soc, 3),
+            "end_soc": round(end_soc, 3),
+            "start_energy": round(start_energy, 3),
+            "end_energy": round(end_energy, 3),
+            "delta_soc": round(delta_soc, 3),
+            "delta_energy": round(delta_energy, 3),
+            "capacity_kwh": round(capacity_kwh, 3),
+            "start_time": start.get("timestamp"),
+            "end_time": last.get("timestamp"),
+            "direction": direction,
+            "source": source,
+            "temperature_c": temperature_c,
+            "rejected": False,
+            "rejection_reason": None,
+        }
+
+        model = self._battery_capacity_models.setdefault(vin, {})
+        if not _BATTERY_CAPACITY_MIN_KWH <= capacity_kwh <= _BATTERY_CAPACITY_MAX_KWH:
+            self._store_rejected_window(
+                model, window, f"implausible capacity {capacity_kwh:.1f} kWh"
+            )
+            return
+
+        current_median = self._weighted_median_capacity(
+            self._valid_accepted_windows(model)
+        )
+        if current_median is not None and current_median > 0:
+            deviation = abs(capacity_kwh - current_median) / current_median * 100
+            if deviation > _BATTERY_CAPACITY_OUTLIER_DEVIATION_PCT:
+                self._store_rejected_window(
+                    model, window, f"deviates {deviation:.1f}% from rolling median"
+                )
+                return
+
+        accepted = model.get("accepted_windows")
+        accepted = list(accepted) if isinstance(accepted, list) else []
+        accepted.append(window)
+        accepted.sort(key=lambda item: item.get("end_time") or "", reverse=True)
+        model["accepted_windows"] = accepted[:_BATTERY_CAPACITY_MAX_ESTIMATES]
+
+    @staticmethod
+    def _store_rejected_window(
+        model: dict[str, Any], window: dict[str, Any], reason: str
+    ) -> None:
+        """Retain an implausible window for diagnostics, excluded from metrics."""
+        rejected_window = dict(window)
+        rejected_window["rejected"] = True
+        rejected_window["rejection_reason"] = reason
+        rejected = model.get("rejected_windows")
+        rejected = list(rejected) if isinstance(rejected, list) else []
+        rejected.append(rejected_window)
+        rejected.sort(key=lambda item: item.get("end_time") or "", reverse=True)
+        model["rejected_windows"] = rejected[:_BATTERY_CAPACITY_MAX_REJECTED]
+
+    @classmethod
+    def _valid_accepted_windows(
+        cls, model: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Return non-rejected accepted windows that pass sanity bounds."""
+        windows = model.get("accepted_windows")
+        if not isinstance(windows, list):
+            return []
+        valid: list[dict[str, Any]] = []
+        for window in windows:
+            if not isinstance(window, dict) or window.get("rejected"):
+                continue
+            capacity = window.get("capacity_kwh")
+            delta_soc = window.get("delta_soc")
+            if (
+                cls._is_finite_number(capacity)
+                and _BATTERY_CAPACITY_MIN_KWH <= capacity <= _BATTERY_CAPACITY_MAX_KWH
+                and cls._is_finite_number(delta_soc)
+                and _BATTERY_CAPACITY_MIN_SOC_SPAN <= delta_soc <= 100
+            ):
+                valid.append(window)
+        return valid
+
+    @staticmethod
+    def _weighted_median_capacity(
+        windows: list[dict[str, Any]],
+    ) -> float | None:
+        """Return the ΔSOC-weighted median capacity across windows."""
+        if not windows:
+            return None
+        ordered = sorted(windows, key=lambda item: float(item["capacity_kwh"]))
+        total_weight = sum(float(item["delta_soc"]) for item in ordered)
+        if total_weight <= 0:
+            return float(median([float(item["capacity_kwh"]) for item in ordered]))
+        half_weight = total_weight / 2
+        cumulative = 0.0
+        for window in ordered:
+            cumulative += float(window["delta_soc"])
+            if cumulative >= half_weight:
+                return float(window["capacity_kwh"])
+        return float(ordered[-1]["capacity_kwh"])
+
+    @staticmethod
+    def _median_absolute_deviation(
+        values: list[float], center: float
+    ) -> float:
+        """Return the median absolute deviation of values around a center."""
+        if not values:
+            return 0.0
+        return float(median([abs(value - center) for value in values]))
+
+    def _battery_reference_capacity(self, vin: str) -> float:
+        """Return the configured usable-when-new capacity, or 0 if unset."""
+        references = self.entry.options.get(CONF_BATTERY_REFERENCE_CAPACITIES, {})
+        reference = references.get(vin) if isinstance(references, dict) else None
+        if self._is_finite_number(reference) and reference > 0:
+            return float(reference)
+        return 0.0
+
+    def _battery_capacity_metrics(self, vin: str) -> dict[str, Any]:
+        """Return capacity, SOH, and confidence from accepted windows."""
+        model = self._battery_capacity_models.get(vin, {})
+        windows = self._valid_accepted_windows(model)
+        if not windows:
+            return {}
+        estimate = self._weighted_median_capacity(windows)
+        if estimate is None:
+            return {}
+        estimated_capacity = round(float(estimate), 2)
+        total_soc_span = sum(float(window["delta_soc"]) for window in windows)
         confidence = round(min(100.0, total_soc_span), 1)
         metrics: dict[str, Any] = {
             "estimated_usable_capacity": estimated_capacity,
             "battery_soh_confidence": confidence,
         }
-        references = self.entry.options.get(CONF_BATTERY_REFERENCE_CAPACITIES, {})
-        reference_capacity = references.get(vin) if isinstance(references, dict) else None
-        if (
-            isinstance(reference_capacity, (int, float))
-            and not isinstance(reference_capacity, bool)
-            and math.isfinite(reference_capacity)
-        ):
-            reference_capacity_kwh = float(reference_capacity)
-        else:
-            reference_capacity_kwh = 0.0
+        reference_capacity_kwh = self._battery_reference_capacity(vin)
         if reference_capacity_kwh > 0:
             metrics["estimated_battery_soh"] = round(
                 estimated_capacity / reference_capacity_kwh * 100, 1
             )
         return metrics
+
+    def get_battery_capacity_diagnostics(self, vin: str) -> dict[str, Any]:
+        """Return accepted capacity windows and data-quality indicators."""
+        model = self._battery_capacity_models.get(vin, {})
+        windows = self._valid_accepted_windows(model)
+        rejected = model.get("rejected_windows")
+        rejected_count = len(rejected) if isinstance(rejected, list) else 0
+        if not windows:
+            return {
+                "accepted_window_count": 0,
+                "accepted_windows": [],
+                "rejected_window_count": rejected_count,
+            }
+
+        capacities = [float(window["capacity_kwh"]) for window in windows]
+        estimate = self._weighted_median_capacity(windows)
+        newest_end = max(
+            (window.get("end_time") for window in windows if window.get("end_time")),
+            default=None,
+        )
+        newest_age_hours: float | None = None
+        if isinstance(newest_end, str):
+            try:
+                end_dt = datetime.fromisoformat(newest_end)
+            except ValueError:
+                end_dt = None
+            if end_dt is not None and end_dt.tzinfo is not None:
+                newest_age_hours = round(
+                    (datetime.now(timezone.utc) - end_dt).total_seconds() / 3600, 2
+                )
+        detail = [
+            {
+                "start_soc": window.get("start_soc"),
+                "end_soc": window.get("end_soc"),
+                "start_energy": window.get("start_energy"),
+                "end_energy": window.get("end_energy"),
+                "delta_soc": window.get("delta_soc"),
+                "delta_energy": window.get("delta_energy"),
+                "capacity_kwh": window.get("capacity_kwh"),
+                "start_time": window.get("start_time"),
+                "end_time": window.get("end_time"),
+                "direction": window.get("direction"),
+                "source": window.get("source", "unknown"),
+                "temperature_c": window.get("temperature_c"),
+            }
+            for window in windows
+        ]
+        return {
+            "accepted_window_count": len(windows),
+            "accepted_windows": detail,
+            "newest_window_age_hours": newest_age_hours,
+            "median_absolute_deviation_kwh": (
+                round(self._median_absolute_deviation(capacities, float(estimate)), 3)
+                if estimate is not None
+                else None
+            ),
+            "rejected_window_count": rejected_count,
+        }
+
+    def get_battery_soh_diagnostics(self, vin: str) -> dict[str, Any]:
+        """Return the inputs used to compute Battery SOH."""
+        model = self._battery_capacity_models.get(vin, {})
+        windows = self._valid_accepted_windows(model)
+        estimate = self._weighted_median_capacity(windows) if windows else None
+        reference = self._battery_reference_capacity(vin)
+        return {
+            "usable_capacity_kwh": (
+                round(float(estimate), 2) if estimate is not None else None
+            ),
+            "original_usable_capacity_kwh": reference if reference > 0 else None,
+        }
+
+    def get_battery_confidence_diagnostics(self, vin: str) -> dict[str, Any]:
+        """Return the accepted SOC coverage backing SOH Confidence."""
+        model = self._battery_capacity_models.get(vin, {})
+        windows = self._valid_accepted_windows(model)
+        total_span = round(sum(float(window["delta_soc"]) for window in windows), 1)
+        return {
+            "total_soc_span": total_span,
+            "window_count": len(windows),
+        }
+
+    def _migrate_battery_capacity_model(
+        self, model: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Convert legacy 'estimates' entries into accepted-window records."""
+        if not isinstance(model, dict):
+            return {}
+        if isinstance(model.get("accepted_windows"), list):
+            return model
+        legacy = model.get("estimates")
+        accepted: list[dict[str, Any]] = []
+        if isinstance(legacy, list):
+            for estimate in legacy:
+                if not isinstance(estimate, dict):
+                    continue
+                capacity = estimate.get("capacity_kwh")
+                soc_span = estimate.get("soc_span")
+                if not (
+                    self._is_finite_number(capacity)
+                    and self._is_finite_number(soc_span)
+                ):
+                    continue
+                legacy_source = estimate.get("source")
+                accepted.append(
+                    {
+                        "start_soc": estimate.get("start_soc_percent"),
+                        "end_soc": estimate.get("end_soc_percent"),
+                        "start_energy": estimate.get("start_energy_kwh"),
+                        "end_energy": estimate.get("end_energy_kwh"),
+                        "delta_soc": round(float(soc_span), 3),
+                        "delta_energy": estimate.get("energy_delta_kwh"),
+                        "capacity_kwh": round(float(capacity), 3),
+                        "start_time": estimate.get("start_timestamp"),
+                        "end_time": estimate.get("end_timestamp"),
+                        "direction": None,
+                        "source": (
+                            "recorder" if legacy_source == "recorder" else "live"
+                        ),
+                        "temperature_c": None,
+                        "rejected": False,
+                        "rejection_reason": None,
+                    }
+                )
+        migrated = {
+            key: value
+            for key, value in model.items()
+            if key not in ("estimates", "anchor", "last_sample", "direction")
+        }
+        migrated["accepted_windows"] = accepted[-_BATTERY_CAPACITY_MAX_ESTIMATES:]
+        return migrated
 
     async def async_import_battery_history(self) -> None:
         """Seed capacity estimates from tightly paired Recorder history states."""
@@ -971,7 +1211,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for vehicle in self._vehicles:
             vin = vehicle["vin"]
             model = self._battery_capacity_models.get(vin, {})
-            if isinstance(model.get("estimates"), list) and model["estimates"]:
+            accepted = model.get("accepted_windows")
+            if isinstance(accepted, list) and accepted:
                 continue
             last_attempt = model.get("history_import_attempted_at")
             if isinstance(last_attempt, str):
@@ -1029,10 +1270,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
 
             current_model = self._battery_capacity_models.get(vin, {})
-            if (
-                isinstance(current_model.get("estimates"), list)
-                and current_model["estimates"]
-            ):
+            current_accepted = current_model.get("accepted_windows")
+            if isinstance(current_accepted, list) and current_accepted:
                 continue
 
             attempted = True
@@ -1052,6 +1291,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     observed_at,
                     source="recorder",
                 )
+            self.flush_active_battery_window(vin)
             metrics = self._battery_capacity_metrics(vin)
             imported_model = self._battery_capacity_models.setdefault(vin, {})
             imported_model["history_import_attempted_at"] = end_time.isoformat()

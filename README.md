@@ -463,37 +463,39 @@ Tesla Pulse estimates current usable battery capacity from `Soc` and `EnergyRema
 
 #### How the calculation works
 
-1. **Start a window.** Tesla Pulse saves a same-record pair of SOC and remaining energy, such as 68% and 44.88 kWh.
-2. **Wait for a useful change.** It waits until a later same-record pair moves at least 20 SOC percentage points in the same direction. If the car starts charging, then starts discharging, or there is a gap longer than six hours, that window is discarded and a new one starts. This avoids comparing unrelated battery states.
-3. **Calculate usable capacity.** It divides the energy change by the SOC change, then scales it to 100%:
+1. **Start a window.** Tesla Pulse saves a same-record pair of SOC and remaining energy, such as 90% and 58.5 kWh, and notes whether the pack is charging or discharging.
+2. **Follow the whole run.** The window stays open for the entire same-direction run, not just the first 20 SOC points. Small opposite steps (for example, brief regen while driving) are treated as noise using hysteresis: a single reversal within 1 SOC point is ignored, and the run ends after two consecutive small reversals or any larger reversal. The window also closes when telemetry is silent for more than six hours.
+3. **Accept the window if it is long enough.** When a window closes, Tesla Pulse keeps it only if the SOC moved at least 20 percentage points. It then divides the energy change by the SOC change and scales to 100%:
 
   $$
-  \\text{usable capacity (kWh)} = \\frac{|\\Delta \\text{EnergyRemaining}|}{|\\Delta \\text{SOC}|} \\times 100
+  \text{usable capacity (kWh)} = \frac{|\Delta \text{EnergyRemaining}|}{|\Delta \text{SOC}|} \times 100
   $$
 
-  For example, if energy rises from 44.88 kWh at 68% to 57.78 kWh at 88%:
+  For example, discharging from 58.5 kWh at 90% to 39.0 kWh at 60%:
 
   $$
-  \\frac{|57.78 - 44.88|}{|88 - 68|} \\times 100 = \\frac{12.90}{20} \\times 100 = 64.5\\ \\text{kWh}
+  \frac{|39.0 - 58.5|}{|60 - 90|} \times 100 = \frac{19.5}{30} \times 100 = 65.0\ \text{kWh}
   $$
 
-  The accepted end of this window becomes the next start, so accepted windows do not overlap.
-
-4. **Combine recent windows.** Tesla Pulse retains up to the newest 12 valid windows and uses their median as **Usable Capacity**. The median is the middle value after sorting the window estimates, so one unusually high or low window has less influence than it would on an average.
+  The sample that closes a window starts the next one, so accepted windows do not overlap.
+4. **Reject implausible windows.** A window is discarded if the result is outside 10–200 kWh, or if it deviates more than 35% from the current rolling median. Rejected windows are kept only for diagnostics and never affect the reported value.
+5. **Combine recent windows.** Tesla Pulse retains up to the newest 12 accepted windows and reports their **ΔSOC-weighted median** as **Usable Capacity**. Weighting by SOC span gives a long 60-point window more influence than a short 20-point window while remaining resistant to a single bad window.
 
 To calculate **Battery SOH**, Tesla Pulse compares **Usable Capacity** with the **Original usable capacity** entered in integration options:
 
 $$
-\\text{Battery SOH (\\%)} = \\frac{\\text{estimated usable capacity}}{\\text{original usable capacity when new}} \\times 100
+\text{Battery SOH (\%)} = \frac{\text{estimated usable capacity}}{\text{original usable capacity when new}} \times 100
 $$
 
-For example, a 64.5 kWh estimate and an original usable capacity of 73.5 kWh gives:
+For example, a 65.0 kWh estimate and an original usable capacity of 73.5 kWh gives:
 
 $$
-\\frac{64.5}{73.5} \\times 100 = 87.8\\%
+\frac{65.0}{73.5} \times 100 = 88.4\%
 $$
 
-**SOH Confidence** is the total SOC span across the retained valid windows, capped at 100%. A 20% confidence means one accepted 20-point window; it does not mean the result is 20% accurate or inaccurate. Confidence reflects the amount of recent accepted data, not elapsed time. As more valid charge or discharge windows are collected, the median becomes less sensitive to temperature, balancing, rounding, and BMS recalibration. Once more than 12 windows exist, the oldest window is removed when a new one is accepted, so the estimate follows sustained long-term change instead of being fixed forever.
+The options screen also offers non-authoritative capacity presets by model as a starting point. Any value you enter always overrides a preset; presets are approximate because usable capacity varies by build and has been adjusted by Tesla over the air.
+
+**SOH Confidence** is the total SOC span across the retained accepted windows, capped at 100%. A 20% confidence means one accepted 20-point window; it does not mean the result is 20% accurate or inaccurate. Confidence reflects the amount of recent accepted data, not elapsed time. As more valid charge or discharge windows are collected, the weighted median becomes less sensitive to temperature, balancing, rounding, and BMS recalibration. Once more than 12 windows exist, the oldest is removed when a new one is accepted, so the estimate follows sustained long-term change instead of being fixed forever.
 
 Open the integration options and enter each vehicle's **Original usable capacity** in kWh to enable the **Battery SOH** sensor. Enter the usable battery capacity when new, not the pack's nominal nameplate capacity. Leaving the value blank disables only **Battery SOH**; **Usable Capacity** and **SOH Confidence** remain available after enough telemetry has been collected.
 
@@ -501,7 +503,7 @@ The result is an estimate, not a Tesla BMS or service-mode measurement. Temperat
 
 When Recorder is enabled and no estimate has been saved yet, Tesla Pulse scans up to 30 days of existing Battery Level and Energy Remaining history. It imports only source states recorded within two seconds of each other, preserving the same-update requirement. If the retained history does not contain at least one valid 20-point SOC window, the sensors remain unavailable until enough new telemetry arrives.
 
-The **Usable Capacity** sensor includes `accepted_window_count` and `accepted_windows` diagnostic attributes. Each accepted window records its start and end SOC, start and end energy, energy delta, calculated capacity, timestamps, and whether it came from live telemetry or Recorder history. Older estimates created before this diagnostic data was added remain usable but show blank endpoint fields.
+The **Usable Capacity** sensor exposes diagnostic attributes for troubleshooting: `accepted_window_count`, `accepted_windows`, `rejected_window_count`, `newest_window_age_hours`, and `median_absolute_deviation_kwh`. Each entry in `accepted_windows` records its start and end SOC, start and end energy, SOC and energy deltas, calculated capacity, timestamps, direction, source (`live` or `recorder`), and average battery temperature when available. `newest_window_age_hours` distinguishes a value backed by recent data from one built only from old imported history, and `median_absolute_deviation_kwh` indicates how tightly the windows agree. The **Battery SOH** sensor exposes `usable_capacity_kwh` and `original_usable_capacity_kwh`, and **SOH Confidence** exposes `total_soc_span` and `window_count`. Estimates created before these diagnostic fields existed remain usable but show blank endpoint fields.
 
 Do not reuse the command-proxy certificate for telemetry, publish the ZMQ endpoint, or place the telemetry private key in a tunnel, reverse proxy, Git repository, or support request.
 
