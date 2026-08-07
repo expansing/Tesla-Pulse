@@ -459,13 +459,17 @@ To change the hostname, port, or telemetry CA, update the integration options an
 
 ### Estimated battery state of health
 
-Tesla Pulse can estimate current usable battery capacity from `Soc` and `EnergyRemaining` values received together in Fleet Telemetry. The estimator requires at least a 20 percentage-point SOC change before producing a sample and uses the median of up to 12 non-overlapping samples to reduce noise.
+Tesla Pulse estimates current usable battery capacity from `Soc` and `EnergyRemaining` values received together in Fleet Telemetry. It starts a window with one same-record pair, then accepts the next same-direction pair at least 20 SOC percentage points away. For example, a window from 68% and 44.88 kWh to 88% and 57.78 kWh has a 20-point SOC span and estimates $100 \times (57.78 - 44.88) / (88 - 68) = 64.5$ kWh. The start becomes the next anchor after acceptance, so windows do not overlap. A reversal, an inconsistent SOC/energy direction, or a gap over six hours starts a new window instead.
+
+**SOH Confidence** is the sum of SOC spans from the currently retained accepted windows, capped at 100%. A 20% confidence therefore means one accepted 20-point window, not a 20% certainty that the estimate is correct. The estimator retains the newest 12 accepted windows and reports their median as **Usable Capacity**. Over time, new windows replace old ones, so the median follows sustained changes while reducing the effect of individual temperature, balancing, rounding, or BMS-recalibration events. Confidence reflects the retained windows, not elapsed calendar time, and does not by itself prove a permanent battery-health trend.
 
 Open the integration options and enter each vehicle's **Original usable capacity** in kWh to enable the **Battery SOH** sensor. Enter the usable battery capacity when new, not the pack's nominal nameplate capacity. Leaving the value blank disables only **Battery SOH**; **Usable Capacity** and **SOH Confidence** remain available after enough telemetry has been collected.
 
 The result is an estimate, not a Tesla BMS or service-mode measurement. Temperature, battery balancing, hidden buffers, and BMS recalibration can affect it. Confidence reaches 100% after accepted estimation windows cover a cumulative 100 SOC percentage points.
 
 When Recorder is enabled and no estimate has been saved yet, Tesla Pulse scans up to 30 days of existing Battery Level and Energy Remaining history. It imports only source states recorded within two seconds of each other, preserving the same-update requirement. If the retained history does not contain at least one valid 20-point SOC window, the sensors remain unavailable until enough new telemetry arrives.
+
+The **Usable Capacity** sensor includes `accepted_window_count` and `accepted_windows` diagnostic attributes. Each accepted window records its start and end SOC, start and end energy, energy delta, calculated capacity, timestamps, and whether it came from live telemetry or Recorder history. Older estimates created before this diagnostic data was added remain usable but show blank endpoint fields.
 
 Do not reuse the command-proxy certificate for telemetry, publish the ZMQ endpoint, or place the telemetry private key in a tunnel, reverse proxy, Git repository, or support request.
 

@@ -772,6 +772,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         soc_percent: Any,
         energy_remaining_kwh: Any,
         observed_at: datetime | None = None,
+        source: str = "telemetry",
     ) -> dict[str, Any]:
         """Estimate usable battery capacity from a same-record SOC/energy pair."""
         if (
@@ -845,7 +846,15 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 estimates.append(
                     {
                         "capacity_kwh": round(capacity_kwh, 3),
+                        "end_energy_kwh": round(sample["energy"], 3),
+                        "end_soc_percent": round(sample["soc"], 3),
+                        "end_timestamp": sample["timestamp"],
+                        "energy_delta_kwh": round(abs(energy_delta), 3),
                         "soc_span": round(abs(soc_delta), 3),
+                        "source": source if source in {"recorder", "telemetry"} else "telemetry",
+                        "start_energy_kwh": round(float(anchor["energy"]), 3),
+                        "start_soc_percent": round(float(anchor["soc"]), 3),
+                        "start_timestamp": anchor["timestamp"],
                     }
                 )
                 model["estimates"] = estimates[-_BATTERY_CAPACITY_MAX_ESTIMATES:]
@@ -854,6 +863,45 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         model["anchor"] = anchor
         model["last_sample"] = sample
         return self._battery_capacity_metrics(vin)
+
+    def get_battery_capacity_diagnostics(self, vin: str) -> dict[str, Any]:
+        """Return accepted capacity windows suitable for a diagnostic sensor."""
+        model = self._battery_capacity_models.get(vin, {})
+        estimates = model.get("estimates", [])
+        if not isinstance(estimates, list):
+            return {"accepted_windows": [], "accepted_window_count": 0}
+
+        windows: list[dict[str, Any]] = []
+        for estimate in estimates:
+            if not isinstance(estimate, dict):
+                continue
+            capacity_kwh = estimate.get("capacity_kwh")
+            soc_span = estimate.get("soc_span")
+            if not (
+                self._is_finite_number(capacity_kwh)
+                and _BATTERY_CAPACITY_MIN_KWH <= capacity_kwh <= _BATTERY_CAPACITY_MAX_KWH
+                and self._is_finite_number(soc_span)
+                and _BATTERY_CAPACITY_MIN_SOC_SPAN <= soc_span <= 100
+            ):
+                continue
+            windows.append(
+                {
+                    "capacity_kwh": round(float(capacity_kwh), 3),
+                    "end_energy_kwh": estimate.get("end_energy_kwh"),
+                    "end_soc_percent": estimate.get("end_soc_percent"),
+                    "end_timestamp": estimate.get("end_timestamp"),
+                    "energy_delta_kwh": estimate.get("energy_delta_kwh"),
+                    "soc_span_percent": round(float(soc_span), 3),
+                    "source": estimate.get("source", "unknown"),
+                    "start_energy_kwh": estimate.get("start_energy_kwh"),
+                    "start_soc_percent": estimate.get("start_soc_percent"),
+                    "start_timestamp": estimate.get("start_timestamp"),
+                }
+            )
+        return {
+            "accepted_window_count": len(windows),
+            "accepted_windows": windows,
+        }
 
     def _battery_capacity_metrics(self, vin: str) -> dict[str, Any]:
         """Return capacity metrics derived from persisted estimates and options."""
@@ -1002,6 +1050,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     soc_percent,
                     energy_remaining_kwh,
                     observed_at,
+                    source="recorder",
                 )
             metrics = self._battery_capacity_metrics(vin)
             imported_model = self._battery_capacity_models.setdefault(vin, {})

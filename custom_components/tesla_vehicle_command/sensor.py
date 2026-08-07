@@ -1658,6 +1658,13 @@ class TeslaSensorEntity(TeslaVehicleCommandEntity, SensorEntity):
         return options[0] if options else None
 
     @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return calculation provenance for the usable capacity estimate."""
+        if self.entity_description.key != "estimated_usable_capacity":
+            return {}
+        return self.coordinator.get_battery_capacity_diagnostics(self.vin)
+
+    @property
     def native_value(self) -> Any:
         """Return the state of the sensor."""
         vehicle_data = self.coordinator.data.get(self.vin, {})
