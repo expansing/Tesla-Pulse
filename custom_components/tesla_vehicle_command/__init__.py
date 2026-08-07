@@ -103,6 +103,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_create_background_task(
+        hass,
+        coordinator.async_import_battery_history(),
+        "import Tesla Pulse battery history",
+    )
 
     # Register services
     async def handle_set_valet_mode(call: ServiceCall) -> None:

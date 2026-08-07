@@ -1,6 +1,7 @@
 {
   "domain": "tesla_vehicle_command",
   "name": "Tesla Pulse",
+  "after_dependencies": ["recorder"],
   "codeowners": ["@expansing"],
   "config_flow": true,
   "dependencies": [],
@@ -10,5 +11,5 @@
   "issue_tracker": "https://github.com/expansing/tesla_vehicle_command/issues",
   "loggers": ["tesla_vehicle_command"],
   "requirements": ["aiohttp>=3.9.0", "cryptography>=42.0.0", "pyjwt>=2.8.0", "pyzmq>=25.0.0"],
-  "version": "0.6.25"
+  "version": "0.6.26"
 }

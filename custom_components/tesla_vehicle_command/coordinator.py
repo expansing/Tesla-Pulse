@@ -6,7 +6,8 @@ import asyncio
 import logging
 import math
 import ssl
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from functools import partial
 from statistics import median
 from typing import Any, Callable
 
@@ -280,6 +281,9 @@ _BATTERY_CAPACITY_MAX_SESSION_GAP = timedelta(hours=6)
 _BATTERY_CAPACITY_MIN_KWH = 10.0
 _BATTERY_CAPACITY_MAX_KWH = 200.0
 _BATTERY_CAPACITY_MAX_ESTIMATES = 12
+_BATTERY_HISTORY_LOOKBACK = timedelta(days=30)
+_BATTERY_HISTORY_PAIR_TOLERANCE = timedelta(seconds=2)
+_BATTERY_HISTORY_RETRY_INTERVAL = timedelta(days=1)
 _COMMAND_STATE_SIGNALS = {
     ("charge_state", "charge_limit_soc"): "ChargeLimitSoc",
     ("charge_state", "charge_port_door_open"): "ChargePortDoorOpen",
@@ -763,7 +767,11 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     def record_battery_capacity_sample(
-        self, vin: str, soc_percent: Any, energy_remaining_kwh: Any
+        self,
+        vin: str,
+        soc_percent: Any,
+        energy_remaining_kwh: Any,
+        observed_at: datetime | None = None,
     ) -> dict[str, Any]:
         """Estimate usable battery capacity from a same-record SOC/energy pair."""
         if (
@@ -774,7 +782,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ):
             return {}
 
-        now = datetime.now().astimezone()
+        now = observed_at or datetime.now().astimezone()
+        if now.tzinfo is None:
+            return {}
         sample = {
             "soc": float(soc_percent),
             "energy": float(energy_remaining_kwh),
@@ -896,6 +906,166 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 estimated_capacity / reference_capacity_kwh * 100, 1
             )
         return metrics
+
+    async def async_import_battery_history(self) -> None:
+        """Seed capacity estimates from tightly paired Recorder history states."""
+        if "recorder" not in self.hass.config.components:
+            return
+
+        from homeassistant.components.recorder import get_instance, history
+        from homeassistant.helpers import entity_registry as er
+
+        entity_registry = er.async_get(self.hass)
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - _BATTERY_HISTORY_LOOKBACK
+        imported = False
+        attempted = False
+        for vehicle in self._vehicles:
+            vin = vehicle["vin"]
+            model = self._battery_capacity_models.get(vin, {})
+            if isinstance(model.get("estimates"), list) and model["estimates"]:
+                continue
+            last_attempt = model.get("history_import_attempted_at")
+            if isinstance(last_attempt, str):
+                try:
+                    last_attempt_at = datetime.fromisoformat(last_attempt)
+                except ValueError:
+                    pass
+                else:
+                    if (
+                        last_attempt_at.tzinfo is not None
+                        and end_time - last_attempt_at
+                        < _BATTERY_HISTORY_RETRY_INTERVAL
+                    ):
+                        continue
+
+            soc_entity_id = entity_registry.async_get_entity_id(
+                "sensor", DOMAIN, f"{vin}_battery_level"
+            )
+            energy_entity_id = entity_registry.async_get_entity_id(
+                "sensor", DOMAIN, f"{vin}_energy_remaining"
+            )
+            if not soc_entity_id or not energy_entity_id:
+                continue
+
+            try:
+                states = await get_instance(self.hass).async_add_executor_job(
+                    partial(
+                        history.get_significant_states,
+                        hass=self.hass,
+                        start_time=start_time,
+                        end_time=end_time,
+                        entity_ids=[soc_entity_id, energy_entity_id],
+                        filters=None,
+                        include_start_time_state=False,
+                        significant_changes_only=False,
+                        minimal_response=False,
+                        no_attributes=True,
+                    )
+                )
+                pairs = self._pair_battery_history_states(
+                    states.get(soc_entity_id, []),
+                    states.get(energy_entity_id, []),
+                )
+            except Exception:
+                _LOGGER.warning(
+                    "Unable to import battery history for %s",
+                    vin,
+                    exc_info=True,
+                )
+                failed_model = self._battery_capacity_models.setdefault(vin, {})
+                failed_model["history_import_attempted_at"] = (
+                    end_time.isoformat()
+                )
+                attempted = True
+                continue
+
+            current_model = self._battery_capacity_models.get(vin, {})
+            if (
+                isinstance(current_model.get("estimates"), list)
+                and current_model["estimates"]
+            ):
+                continue
+
+            attempted = True
+            if not pairs:
+                current_model["history_import_attempted_at"] = (
+                    end_time.isoformat()
+                )
+                self._battery_capacity_models[vin] = current_model
+                continue
+
+            self._battery_capacity_models.pop(vin, None)
+            for observed_at, soc_percent, energy_remaining_kwh in pairs:
+                self.record_battery_capacity_sample(
+                    vin,
+                    soc_percent,
+                    energy_remaining_kwh,
+                    observed_at,
+                )
+            metrics = self._battery_capacity_metrics(vin)
+            imported_model = self._battery_capacity_models.setdefault(vin, {})
+            imported_model["history_import_attempted_at"] = end_time.isoformat()
+            if not metrics:
+                continue
+
+            vehicle_data = self.data.get(vin, {})
+            response = vehicle_data.get("response", {})
+            charge_state = response.get("charge_state")
+            if isinstance(charge_state, dict):
+                charge_state.update(metrics)
+                imported = True
+
+        if imported:
+            self.async_set_updated_data(dict(self.data))
+        if attempted:
+            self._telemetry_store.async_delay_save(
+                self._telemetry_store_payload, 30
+            )
+
+    @staticmethod
+    def _pair_battery_history_states(
+        soc_states: list[Any], energy_states: list[Any]
+    ) -> list[tuple[datetime, float, float]]:
+        """Pair source states only when Recorder timestamps identify one update."""
+        energy_index = 0
+        pairs: list[tuple[datetime, float, float]] = []
+        for soc_state in soc_states:
+            if energy_index >= len(energy_states):
+                break
+            while energy_index + 1 < len(energy_states) and abs(
+                energy_states[energy_index + 1].last_updated
+                - soc_state.last_updated
+            ) <= abs(
+                energy_states[energy_index].last_updated
+                - soc_state.last_updated
+            ):
+                energy_index += 1
+            energy_state = energy_states[energy_index]
+            if (
+                abs(energy_state.last_updated - soc_state.last_updated)
+                > _BATTERY_HISTORY_PAIR_TOLERANCE
+            ):
+                continue
+            try:
+                soc_percent = float(soc_state.state)
+                energy_remaining_kwh = float(energy_state.state)
+            except (TypeError, ValueError):
+                continue
+            if not (
+                math.isfinite(soc_percent)
+                and math.isfinite(energy_remaining_kwh)
+            ):
+                continue
+            pairs.append(
+                (
+                    max(soc_state.last_updated, energy_state.last_updated),
+                    soc_percent,
+                    energy_remaining_kwh,
+                )
+            )
+            energy_index += 1
+        return pairs
 
     def set_telemetry_data(
         self,
