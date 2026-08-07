@@ -459,9 +459,40 @@ To change the hostname, port, or telemetry CA, update the integration options an
 
 ### Estimated battery state of health
 
-Tesla Pulse estimates current usable battery capacity from `Soc` and `EnergyRemaining` values received together in Fleet Telemetry. It starts a window with one same-record pair, then accepts the next same-direction pair at least 20 SOC percentage points away. For example, a window from 68% and 44.88 kWh to 88% and 57.78 kWh has a 20-point SOC span and estimates $100 \times (57.78 - 44.88) / (88 - 68) = 64.5$ kWh. The start becomes the next anchor after acceptance, so windows do not overlap. A reversal, an inconsistent SOC/energy direction, or a gap over six hours starts a new window instead.
+Tesla Pulse estimates current usable battery capacity from `Soc` and `EnergyRemaining` values received together in Fleet Telemetry. It does not read a battery-health value directly from Tesla.
 
-**SOH Confidence** is the sum of SOC spans from the currently retained accepted windows, capped at 100%. A 20% confidence therefore means one accepted 20-point window, not a 20% certainty that the estimate is correct. The estimator retains the newest 12 accepted windows and reports their median as **Usable Capacity**. Over time, new windows replace old ones, so the median follows sustained changes while reducing the effect of individual temperature, balancing, rounding, or BMS-recalibration events. Confidence reflects the retained windows, not elapsed calendar time, and does not by itself prove a permanent battery-health trend.
+#### How the calculation works
+
+1. **Start a window.** Tesla Pulse saves a same-record pair of SOC and remaining energy, such as 68% and 44.88 kWh.
+2. **Wait for a useful change.** It waits until a later same-record pair moves at least 20 SOC percentage points in the same direction. If the car starts charging, then starts discharging, or there is a gap longer than six hours, that window is discarded and a new one starts. This avoids comparing unrelated battery states.
+3. **Calculate usable capacity.** It divides the energy change by the SOC change, then scales it to 100%:
+
+  $$
+  \\text{usable capacity (kWh)} = \\frac{|\\Delta \\text{EnergyRemaining}|}{|\\Delta \\text{SOC}|} \\times 100
+  $$
+
+  For example, if energy rises from 44.88 kWh at 68% to 57.78 kWh at 88%:
+
+  $$
+  \\frac{|57.78 - 44.88|}{|88 - 68|} \\times 100 = \\frac{12.90}{20} \\times 100 = 64.5\\ \\text{kWh}
+  $$
+
+  The accepted end of this window becomes the next start, so accepted windows do not overlap.
+4. **Combine recent windows.** Tesla Pulse retains up to the newest 12 valid windows and uses their median as **Usable Capacity**. The median is the middle value after sorting the window estimates, so one unusually high or low window has less influence than it would on an average.
+
+To calculate **Battery SOH**, Tesla Pulse compares **Usable Capacity** with the **Original usable capacity** entered in integration options:
+
+$$
+\\text{Battery SOH (\\%)} = \\frac{\\text{estimated usable capacity}}{\\text{original usable capacity when new}} \\times 100
+$$
+
+For example, a 64.5 kWh estimate and an original usable capacity of 73.5 kWh gives:
+
+$$
+\\frac{64.5}{73.5} \\times 100 = 87.8\\%
+$$
+
+**SOH Confidence** is the total SOC span across the retained valid windows, capped at 100%. A 20% confidence means one accepted 20-point window; it does not mean the result is 20% accurate or inaccurate. Confidence reflects the amount of recent accepted data, not elapsed time. As more valid charge or discharge windows are collected, the median becomes less sensitive to temperature, balancing, rounding, and BMS recalibration. Once more than 12 windows exist, the oldest window is removed when a new one is accepted, so the estimate follows sustained long-term change instead of being fixed forever.
 
 Open the integration options and enter each vehicle's **Original usable capacity** in kWh to enable the **Battery SOH** sensor. Enter the usable battery capacity when new, not the pack's nominal nameplate capacity. Leaving the value blank disables only **Battery SOH**; **Usable Capacity** and **SOH Confidence** remain available after enough telemetry has been collected.
 
