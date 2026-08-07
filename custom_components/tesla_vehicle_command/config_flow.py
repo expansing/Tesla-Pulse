@@ -452,14 +452,8 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
     def _battery_preset_selector() -> selector.SelectSelector:
         """Return a non-authoritative usable-capacity preset dropdown."""
         options = [
-            selector.SelectOptionDict(
-                value=BATTERY_CAPACITY_PRESET_CUSTOM,
-                label=BATTERY_CAPACITY_PRESET_CUSTOM,
-            ),
-            *(
-                selector.SelectOptionDict(value=key, label=key)
-                for key in BATTERY_CAPACITY_PRESETS
-            ),
+            BATTERY_CAPACITY_PRESET_CUSTOM,
+            *BATTERY_CAPACITY_PRESETS,
         ]
         return selector.SelectSelector(
             selector.SelectSelectorConfig(
