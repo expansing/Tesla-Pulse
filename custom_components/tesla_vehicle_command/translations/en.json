@@ -51,14 +51,16 @@
           "telemetry_hostname": "Fleet Telemetry hostname",
           "telemetry_inactivity_minutes": "Minutes without telemetry before vehicle is asleep",
           "telemetry_port": "Fleet Telemetry port",
-          "wake_on_startup": "Wake vehicle and refresh from API on startup"
+          "wake_on_startup": "Wake vehicle and refresh from API on startup",
+          "battery_reference_capacity_kwh": "Original usable capacity"
         },
         "data_description": {
           "update_interval": "Seconds between fallback vehicle-data requests. Short intervals can keep the vehicle awake and increase Fleet API traffic.",
           "telemetry_hostname": "Public DNS hostname for the Tesla Fleet Telemetry receiver. Leave blank until the telemetry add-on and public network route are ready.",
           "telemetry_inactivity_minutes": "After this interval without a vehicle telemetry frame, Tesla Pulse marks the vehicle as asleep. Commands wait for a new frame after wake-up before execution.",
           "telemetry_port": "Public TCP port for the Fleet Telemetry receiver.",
-          "wake_on_startup": "When enabled, wakes each vehicle and refreshes its state through the Fleet API after Home Assistant starts. When disabled, the last cached telemetry state is restored and the vehicle remains asleep until telemetry arrives."
+          "wake_on_startup": "When enabled, wakes each vehicle and refreshes its state through the Fleet API after Home Assistant starts. When disabled, the last cached telemetry state is restored and the vehicle remains asleep until telemetry arrives.",
+          "battery_reference_capacity_kwh": "Original usable pack capacity in kWh. Leave blank to hide SOH while retaining capacity estimates."
         }
       },
       "battery": {
@@ -85,9 +87,9 @@
       "charge_current": { "name": "Charge Current" },
       "charge_power": { "name": "Charge Power" },
       "charge_energy_added": { "name": "Charge Energy Added" },
-      "estimated_usable_capacity": { "name": "Estimated Usable Battery Capacity" },
-      "estimated_battery_soh": { "name": "Estimated Battery State of Health" },
-      "battery_soh_confidence": { "name": "Battery SOH Confidence" },
+      "estimated_usable_capacity": { "name": "Usable Capacity" },
+      "estimated_battery_soh": { "name": "Battery SOH" },
+      "battery_soh_confidence": { "name": "SOH Confidence" },
       "time_to_full_charge": { "name": "Time to Full Charge" },
       "inside_temp": { "name": "Inside Temperature" },
       "isolation_resistance": { "name": "Isolation Resistance" },

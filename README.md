@@ -461,9 +461,11 @@ To change the hostname, port, or telemetry CA, update the integration options an
 
 Tesla Pulse can estimate current usable battery capacity from `Soc` and `EnergyRemaining` values received together in Fleet Telemetry. The estimator requires at least a 20 percentage-point SOC change before producing a sample and uses the median of up to 12 non-overlapping samples to reduce noise.
 
-Open the integration options and enter each vehicle's **usable battery capacity when new** in kWh to enable the **Estimated Battery State of Health** sensor. Use usable capacity rather than the pack's nominal nameplate capacity. Leaving the value blank disables only the SOH percentage; estimated usable capacity and confidence remain available after enough telemetry has been collected.
+Open the integration options and enter each vehicle's **Original usable capacity** in kWh to enable the **Battery SOH** sensor. Enter the usable battery capacity when new, not the pack's nominal nameplate capacity. Leaving the value blank disables only **Battery SOH**; **Usable Capacity** and **SOH Confidence** remain available after enough telemetry has been collected.
 
 The result is an estimate, not a Tesla BMS or service-mode measurement. Temperature, battery balancing, hidden buffers, and BMS recalibration can affect it. Confidence reaches 100% after accepted estimation windows cover a cumulative 100 SOC percentage points.
+
+When Recorder is enabled and no estimate has been saved yet, Tesla Pulse scans up to 30 days of existing Battery Level and Energy Remaining history. It imports only source states recorded within two seconds of each other, preserving the same-update requirement. If the retained history does not contain at least one valid 20-point SOC window, the sensors remain unavailable until enough new telemetry arrives.
 
 Do not reuse the command-proxy certificate for telemetry, publish the ZMQ endpoint, or place the telemetry private key in a tunnel, reverse proxy, Git repository, or support request.
 
@@ -485,9 +487,9 @@ The integration provides battery health diagnostics derived from Fleet Telemetry
 | **Brick Voltage Min** | mV | Lowest individual brick voltage in the pack |
 | **Brick Voltage Imbalance** | mV | Difference between max and min brick voltage (ΔV) |
 | **Battery Balance Score** | % | SOC-aware health score (0–100%) |
-| **Estimated Usable Battery Capacity** | kWh | Median usable-capacity estimate from same-record SOC and remaining-energy windows |
-| **Estimated Battery State of Health** | % | Estimated usable capacity divided by the configured usable capacity when new |
-| **Battery SOH Confidence** | % | Cumulative accepted SOC span, capped at 100% |
+| **Usable Capacity** | kWh | Median usable-capacity estimate from same-record SOC and remaining-energy windows |
+| **Battery SOH** | % | Estimated usable capacity divided by the configured usable capacity when new |
+| **SOH Confidence** | % | Cumulative accepted SOC span, capped at 100% |
 
 > **Note:** These sensors require **Fleet Telemetry** to be configured and running. The `BrickVoltageMax` and `BrickVoltageMin` fields are only available via telemetry signals, not from the Fleet API `vehicle_data` endpoint. They will show as unavailable until telemetry data is received.
 

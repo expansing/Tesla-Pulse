@@ -373,7 +373,7 @@ SENSOR_DESCRIPTIONS = [
     ),
     TeslaSensorEntityDescription(
         key="estimated_usable_capacity",
-        name="Estimated Usable Battery Capacity",
+        name="Usable Capacity",
         device_class=SensorDeviceClass.ENERGY_STORAGE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
@@ -383,7 +383,7 @@ SENSOR_DESCRIPTIONS = [
     ),
     TeslaSensorEntityDescription(
         key="estimated_battery_soh",
-        name="Estimated Battery State of Health",
+        name="Battery SOH",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         value_path="charge_state.estimated_battery_soh",
@@ -392,7 +392,7 @@ SENSOR_DESCRIPTIONS = [
     ),
     TeslaSensorEntityDescription(
         key="battery_soh_confidence",
-        name="Battery SOH Confidence",
+        name="SOH Confidence",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         value_path="charge_state.battery_soh_confidence",

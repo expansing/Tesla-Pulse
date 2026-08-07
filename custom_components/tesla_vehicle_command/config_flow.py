@@ -450,7 +450,14 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Manage Fleet Telemetry receiver settings."""
         if user_input is not None:
-            self._pending_options = {**self.config_entry.options, **user_input}
+            submitted_options = dict(user_input)
+            submitted_reference = submitted_options.pop(
+                CONF_BATTERY_REFERENCE_CAPACITY_KWH, None
+            )
+            self._pending_options = {
+                **self.config_entry.options,
+                **submitted_options,
+            }
             references = self.config_entry.options.get(
                 CONF_BATTERY_REFERENCE_CAPACITIES, {}
             )
@@ -458,6 +465,19 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                 dict(references) if isinstance(references, dict) else {}
             )
             self._battery_vehicle_index = 0
+            vehicles = self.config_entry.data.get(CONF_VEHICLES, [])
+            if len(vehicles) == 1:
+                vin = vehicles[0][CONF_VIN]
+                if submitted_reference is None:
+                    self._battery_references.pop(vin, None)
+                else:
+                    self._battery_references[vin] = float(submitted_reference)
+                self._pending_options[CONF_BATTERY_REFERENCE_CAPACITIES] = (
+                    self._battery_references
+                )
+                return self.async_create_entry(
+                    title="", data=self._pending_options
+                )
             return await self.async_step_battery()
 
         telemetry_hostname = self.config_entry.options.get(
@@ -471,37 +491,66 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
             CONF_TELEMETRY_PORT, DEFAULT_TELEMETRY_PORT
         )
         wake_on_startup = self.config_entry.options.get(CONF_WAKE_ON_STARTUP, False)
-        schema = vol.Schema(
-            {
+        schema_fields: dict[Any, Any] = {
+            vol.Optional(
+                CONF_TELEMETRY_HOSTNAME, default=telemetry_hostname
+            ): str,
+            vol.Required(
+                CONF_TELEMETRY_INACTIVITY_MINUTES,
+                default=telemetry_inactivity_minutes,
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=MIN_TELEMETRY_INACTIVITY_MINUTES,
+                    max=MAX_TELEMETRY_INACTIVITY_MINUTES,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_TELEMETRY_PORT, default=telemetry_port
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=MIN_TELEMETRY_PORT,
+                    max=MAX_TELEMETRY_PORT,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_WAKE_ON_STARTUP, default=wake_on_startup
+            ): selector.BooleanSelector(),
+        }
+        vehicles = self.config_entry.data.get(CONF_VEHICLES, [])
+        if len(vehicles) == 1:
+            references = self.config_entry.options.get(
+                CONF_BATTERY_REFERENCE_CAPACITIES, {}
+            )
+            current_capacity = (
+                references.get(vehicles[0][CONF_VIN])
+                if isinstance(references, dict)
+                else None
+            )
+            marker_options = (
+                {"description": {"suggested_value": current_capacity}}
+                if current_capacity is not None
+                else {}
+            )
+            schema_fields[
                 vol.Optional(
-                    CONF_TELEMETRY_HOSTNAME, default=telemetry_hostname
-                ): str,
-                vol.Required(
-                    CONF_TELEMETRY_INACTIVITY_MINUTES,
-                    default=telemetry_inactivity_minutes,
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=MIN_TELEMETRY_INACTIVITY_MINUTES,
-                        max=MAX_TELEMETRY_INACTIVITY_MINUTES,
-                        step=1,
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Required(
-                    CONF_TELEMETRY_PORT, default=telemetry_port
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=MIN_TELEMETRY_PORT,
-                        max=MAX_TELEMETRY_PORT,
-                        step=1,
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Required(
-                    CONF_WAKE_ON_STARTUP, default=wake_on_startup
-                ): selector.BooleanSelector(),
-            }
-        )
+                    CONF_BATTERY_REFERENCE_CAPACITY_KWH,
+                    **marker_options,
+                )
+            ] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=10,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement="kWh",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+
+        schema = vol.Schema(schema_fields)
 
         return self.async_show_form(step_id="init", data_schema=schema)
 
