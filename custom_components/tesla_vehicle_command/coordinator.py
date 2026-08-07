@@ -845,7 +845,12 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 streak = int(active.get("reversal_streak", 0)) + 1
                 active["reversal_streak"] = streak
                 if streak < _BATTERY_CAPACITY_REVERSAL_STREAK_LIMIT:
-                    # Small opposite step (regen jitter); treat as noise.
+                    # Small opposite step (regen jitter); treat as noise, but advance time.
+                    active["last"]["timestamp"] = sample["timestamp"]
+                    temperature = sample.get("temperature")
+                    if temperature is not None:
+                        active["temp_sum"] = float(active.get("temp_sum", 0.0)) + float(temperature)
+                        active["temp_count"] = int(active.get("temp_count", 0)) + 1
                     return self._battery_capacity_metrics(vin)
             self._finalize_or_discard_window(vin, active)
             model["active_window"] = self._new_active_window(sample, normalized_source)
