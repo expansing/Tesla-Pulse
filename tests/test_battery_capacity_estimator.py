@@ -297,6 +297,22 @@ def test_reset_battery_history_removes_only_the_selected_source(
     assert model["last_reset_scope"] == "recorder"
 
 
+def test_reset_battery_history_discards_invalid_window_entries(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Scoped reset keeps only dict window entries that remain in scope."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"source": "live"}, "bad-entry", 123],
+        "rejected_windows": [{"source": "live"}, object()],
+    }
+
+    coordinator.reset_battery_capacity_history(VIN, "recorder")
+
+    model = coordinator._battery_capacity_models[VIN]
+    assert model["accepted_windows"] == [{"source": "live"}]
+    assert model["rejected_windows"] == [{"source": "live"}]
+
+
 def test_capacity_diagnostics_include_sources_ranges_and_rejections(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:

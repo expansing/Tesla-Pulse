@@ -1058,7 +1058,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 model[key] = [
                     window
                     for window in windows
-                    if not isinstance(window, dict) or window.get("source") != scope
+                    if isinstance(window, dict) and window.get("source") != scope
                 ]
 
         active = model.get("active_window")
