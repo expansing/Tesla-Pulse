@@ -32,7 +32,21 @@ CONF_WAKE_BEFORE_COMMAND = "wake_before_command"
 CONF_WAKE_ON_STARTUP = "wake_on_startup"
 CONF_BATTERY_REFERENCE_CAPACITIES = "battery_reference_capacities"
 CONF_BATTERY_REFERENCE_CAPACITY_KWH = "battery_reference_capacity_kwh"
+CONF_BATTERY_REFERENCE_CAPACITY_PRESET = "battery_reference_capacity_preset"
 OPT_OPTIONAL_POWERTRAIN_SENSORS_MIGRATED = "optional_powertrain_sensors_migrated"
+
+# Approximate usable-when-new capacities (kWh) by common Tesla configuration.
+# These are non-authoritative suggestions only: usable capacity varies by
+# build batch and has been adjusted by Tesla over the air. Users can and
+# should override any preset with a measured or better-known value.
+BATTERY_CAPACITY_PRESET_CUSTOM = "custom"
+BATTERY_CAPACITY_PRESETS: dict[str, float] = {
+    "model_3_sr": 50.0,
+    "model_3_lr": 73.5,
+    "model_y_lr": 75.0,
+    "model_s_lr": 98.0,
+    "model_x_lr": 98.0,
+}
 
 DEFAULT_TELEMETRY_INACTIVITY_MINUTES = 15
 MAX_TELEMETRY_INACTIVITY_MINUTES = 120

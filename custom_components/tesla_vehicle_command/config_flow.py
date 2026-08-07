@@ -21,8 +21,11 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
 )
 
 from .const import (
+    BATTERY_CAPACITY_PRESET_CUSTOM,
+    BATTERY_CAPACITY_PRESETS,
     CONF_BATTERY_REFERENCE_CAPACITIES,
     CONF_BATTERY_REFERENCE_CAPACITY_KWH,
+    CONF_BATTERY_REFERENCE_CAPACITY_PRESET,
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_FLEET_API_BASE_URL,
@@ -445,6 +448,38 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
         self._battery_references: dict[str, float] = {}
         self._battery_vehicle_index = 0
 
+    @staticmethod
+    def _battery_preset_selector() -> selector.SelectSelector:
+        """Return a non-authoritative usable-capacity preset dropdown."""
+        options = [
+            selector.SelectOptionDict(
+                value=BATTERY_CAPACITY_PRESET_CUSTOM,
+                label=BATTERY_CAPACITY_PRESET_CUSTOM,
+            ),
+            *(
+                selector.SelectOptionDict(value=key, label=key)
+                for key in BATTERY_CAPACITY_PRESETS
+            ),
+        ]
+        return selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=options,
+                mode=selector.SelectSelectorMode.DROPDOWN,
+                translation_key="battery_reference_capacity_preset",
+            )
+        )
+
+    @staticmethod
+    def _resolve_battery_reference(
+        reference: Any, preset: Any
+    ) -> float | None:
+        """Resolve an entered value, else a preset, else no reference."""
+        if reference is not None:
+            return float(reference)
+        if isinstance(preset, str) and preset in BATTERY_CAPACITY_PRESETS:
+            return float(BATTERY_CAPACITY_PRESETS[preset])
+        return None
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -453,6 +488,9 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
             submitted_options = dict(user_input)
             submitted_reference = submitted_options.pop(
                 CONF_BATTERY_REFERENCE_CAPACITY_KWH, None
+            )
+            submitted_preset = submitted_options.pop(
+                CONF_BATTERY_REFERENCE_CAPACITY_PRESET, None
             )
             self._pending_options = {
                 **self.config_entry.options,
@@ -468,10 +506,13 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
             vehicles = self.config_entry.data.get(CONF_VEHICLES, [])
             if len(vehicles) == 1:
                 vin = vehicles[0][CONF_VIN]
-                if submitted_reference is None:
+                resolved = self._resolve_battery_reference(
+                    submitted_reference, submitted_preset
+                )
+                if resolved is None:
                     self._battery_references.pop(vin, None)
                 else:
-                    self._battery_references[vin] = float(submitted_reference)
+                    self._battery_references[vin] = resolved
                 self._pending_options[CONF_BATTERY_REFERENCE_CAPACITIES] = (
                     self._battery_references
                 )
@@ -549,6 +590,12 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                     mode=selector.NumberSelectorMode.BOX,
                 )
             )
+            schema_fields[
+                vol.Optional(
+                    CONF_BATTERY_REFERENCE_CAPACITY_PRESET,
+                    default=BATTERY_CAPACITY_PRESET_CUSTOM,
+                )
+            ] = self._battery_preset_selector()
 
         schema = vol.Schema(schema_fields)
 
@@ -571,10 +618,12 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
             reference_capacity = user_input.get(
                 CONF_BATTERY_REFERENCE_CAPACITY_KWH
             )
-            if reference_capacity is None:
+            preset = user_input.get(CONF_BATTERY_REFERENCE_CAPACITY_PRESET)
+            resolved = self._resolve_battery_reference(reference_capacity, preset)
+            if resolved is None:
                 self._battery_references.pop(vin, None)
             else:
-                self._battery_references[vin] = float(reference_capacity)
+                self._battery_references[vin] = resolved
             self._battery_vehicle_index += 1
             return await self.async_step_battery()
 
@@ -597,7 +646,11 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                         unit_of_measurement="kWh",
                         mode=selector.NumberSelectorMode.BOX,
                     )
-                )
+                ),
+                vol.Optional(
+                    CONF_BATTERY_REFERENCE_CAPACITY_PRESET,
+                    default=BATTERY_CAPACITY_PRESET_CUSTOM,
+                ): self._battery_preset_selector(),
             }
         )
         return self.async_show_form(

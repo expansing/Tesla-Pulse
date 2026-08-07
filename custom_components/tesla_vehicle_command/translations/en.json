@@ -52,7 +52,8 @@
           "telemetry_inactivity_minutes": "Minutes without telemetry before vehicle is asleep",
           "telemetry_port": "Fleet Telemetry port",
           "wake_on_startup": "Wake vehicle and refresh from API on startup",
-          "battery_reference_capacity_kwh": "Original usable capacity"
+          "battery_reference_capacity_kwh": "Original usable capacity",
+          "battery_reference_capacity_preset": "Capacity preset (approximate)"
         },
         "data_description": {
           "update_interval": "Seconds between fallback vehicle-data requests. Short intervals can keep the vehicle awake and increase Fleet API traffic.",
@@ -60,18 +61,33 @@
           "telemetry_inactivity_minutes": "After this interval without a vehicle telemetry frame, Tesla Pulse marks the vehicle as asleep. Commands wait for a new frame after wake-up before execution.",
           "telemetry_port": "Public TCP port for the Fleet Telemetry receiver.",
           "wake_on_startup": "When enabled, wakes each vehicle and refreshes its state through the Fleet API after Home Assistant starts. When disabled, the last cached telemetry state is restored and the vehicle remains asleep until telemetry arrives.",
-          "battery_reference_capacity_kwh": "Original usable pack capacity in kWh. Leave blank to hide SOH while retaining capacity estimates."
+          "battery_reference_capacity_kwh": "Original usable pack capacity in kWh. Leave blank to hide SOH while retaining capacity estimates.",
+          "battery_reference_capacity_preset": "Optional approximate starting value by model. A value entered above always overrides the preset; presets are not authoritative."
         }
       },
       "battery": {
         "title": "Battery health reference for {vehicle_name}",
         "description": "Enter the usable battery capacity when new for {vehicle_name} ({vin}). Leave blank to disable the SOH percentage while still estimating current usable capacity.",
         "data": {
-          "battery_reference_capacity_kwh": "Usable battery capacity when new"
+          "battery_reference_capacity_kwh": "Usable battery capacity when new",
+          "battery_reference_capacity_preset": "Capacity preset (approximate)"
         },
         "data_description": {
-          "battery_reference_capacity_kwh": "The pack's original usable capacity in kWh, excluding inaccessible buffers. This is a user-provided reference, not nominal nameplate capacity."
+          "battery_reference_capacity_kwh": "The pack's original usable capacity in kWh, excluding inaccessible buffers. This is a user-provided reference, not nominal nameplate capacity.",
+          "battery_reference_capacity_preset": "Optional approximate starting value by model. A value entered above always overrides the preset; presets are not authoritative."
         }
+      }
+    }
+  },
+  "selector": {
+    "battery_reference_capacity_preset": {
+      "options": {
+        "custom": "Custom / measured value",
+        "model_3_sr": "Model 3 Standard Range (~50 kWh)",
+        "model_3_lr": "Model 3 Long Range / Performance (~73.5 kWh)",
+        "model_y_lr": "Model Y Long Range / Performance (~75 kWh)",
+        "model_s_lr": "Model S Long Range (~98 kWh)",
+        "model_x_lr": "Model X Long Range (~98 kWh)"
       }
     }
   },
