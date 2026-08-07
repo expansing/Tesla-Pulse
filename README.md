@@ -478,6 +478,7 @@ Tesla Pulse estimates current usable battery capacity from `Soc` and `EnergyRema
   $$
 
   The accepted end of this window becomes the next start, so accepted windows do not overlap.
+
 4. **Combine recent windows.** Tesla Pulse retains up to the newest 12 valid windows and uses their median as **Usable Capacity**. The median is the middle value after sorting the window estimates, so one unusually high or low window has less influence than it would on an average.
 
 To calculate **Battery SOH**, Tesla Pulse compares **Usable Capacity** with the **Original usable capacity** entered in integration options:
