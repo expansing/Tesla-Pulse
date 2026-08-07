@@ -789,9 +789,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ):
             return self._battery_capacity_metrics(vin)
 
-        now = observed_at or datetime.now().astimezone()
+        now = observed_at or datetime.now(timezone.utc)
         if now.tzinfo is None:
             return self._battery_capacity_metrics(vin)
+        now = now.astimezone(timezone.utc)
 
         temperature = (
             float(temperature_c) if self._is_finite_number(temperature_c) else None
