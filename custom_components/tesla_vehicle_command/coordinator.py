@@ -1394,18 +1394,22 @@ hostname = hostname_value.strip() if isinstance(hostname_value, str) else ""
             return
         model = self._battery_capacity_models.setdefault(vin, {})
         day = datetime.now(timezone.utc).date().isoformat()
-        snapshots = model.get("daily_snapshots")
-        snapshots = list(snapshots) if isinstance(snapshots, list) else []
-        snapshot = {
-            "date": day,
-            "usable_capacity_kwh": capacity,
-            "soh_percent": metrics.get("estimated_battery_soh"),
-            "confidence": metrics.get("battery_soh_confidence"),
-        }
-        snapshots = [item for item in snapshots if item.get("date") != day]
-        snapshots.append(snapshot)
-        snapshots.sort(key=lambda item: item.get("date") or "", reverse=True)
-        model["daily_snapshots"] = snapshots[:_BATTERY_SNAPSHOT_MAX_DAYS]
+snapshots = model.get("daily_snapshots")
+snapshots = (
+    [item for item in snapshots if isinstance(item, dict)]
+    if isinstance(snapshots, list)
+    else []
+)
+snapshot = {
+    "date": day,
+    "usable_capacity_kwh": capacity,
+    "soh_percent": metrics.get("estimated_battery_soh"),
+    "confidence": metrics.get("battery_soh_confidence"),
+}
+snapshots = [item for item in snapshots if item.get("date") != day]
+snapshots.append(snapshot)
+snapshots.sort(key=lambda item: item.get("date") or "", reverse=True)
+model["daily_snapshots"] = snapshots[:_BATTERY_SNAPSHOT_MAX_DAYS]
 
     def get_battery_capacity_diagnostics(self, vin: str) -> dict[str, Any]:
         """Return accepted capacity windows and data-quality indicators."""
