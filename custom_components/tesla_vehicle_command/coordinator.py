@@ -28,6 +28,7 @@ from .const import (
     CONF_TELEMETRY_HOSTNAME,
     CONF_TELEMETRY_INACTIVITY_MINUTES,
     CONF_TELEMETRY_PORT,
+    CONF_TELEMETRY_REGISTRATION_REQUIRED_VINS,
     DEFAULT_TELEMETRY_INACTIVITY_MINUTES,
     DOMAIN,
     PROXY_HOST,
@@ -357,6 +358,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             f"{DOMAIN}.{entry.entry_id}.telemetry",
         )
         self._telemetry_receiver_available = False
+        self._telemetry_receiver_diagnostics: dict[str, int] = {}
         self._telemetry_metadata: dict[str, dict[str, Any]] = {}
         self._telemetry_raw_signals: dict[str, dict[str, Any]] = {}
         self._capability_valid_signals: dict[str, set[str]] = {}
@@ -402,6 +404,34 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def set_telemetry_receiver_available(self, available: bool) -> None:
         """Set whether the local Fleet Telemetry receiver is reachable."""
         self._telemetry_receiver_available = available
+
+    def record_telemetry_receiver_error(self, category: str) -> None:
+        """Count a bounded receiver error without storing message contents."""
+        if category not in {
+            "malformed_json",
+            "missing_vin",
+            "unmanaged_vin",
+            "processing_error",
+        }:
+            raise ValueError("Unknown telemetry receiver error category")
+        self._telemetry_receiver_diagnostics[category] = min(
+            self._telemetry_receiver_diagnostics.get(category, 0) + 1,
+            _TELEMETRY_DIAGNOSTIC_COUNTER_MAX,
+        )
+        self._telemetry_store.async_delay_save(self._telemetry_store_payload, 30)
+        self.async_update_listeners()
+
+    def get_telemetry_receiver_diagnostics(self) -> dict[str, int]:
+        """Return receiver-wide bounded error counters."""
+        return {
+            category: self._telemetry_receiver_diagnostics.get(category, 0)
+            for category in (
+                "malformed_json",
+                "missing_vin",
+                "unmanaged_vin",
+                "processing_error",
+            )
+        }
 
     def set_capability_listener(
         self, listener: Callable[[str, set[str], set[str]], None]
@@ -740,6 +770,11 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         metadata = self._telemetry_metadata.get(vin, {})
         last_received = metadata.get("last_received")
         registration_status = metadata.get("registration_status", "not_attempted")
+        pending_vins = self.entry.options.get(
+            CONF_TELEMETRY_REGISTRATION_REQUIRED_VINS, []
+        )
+        if isinstance(pending_vins, list) and vin in pending_vins:
+            registration_status = "registration_required"
 
         return {
             "receiver": (
@@ -848,6 +883,21 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for vin, signals in raw_signals.items()
                 if vin in data and isinstance(signals, dict)
             }
+        receiver_diagnostics = stored_cache.get("receiver_diagnostics")
+        if isinstance(receiver_diagnostics, dict):
+            self._telemetry_receiver_diagnostics = {
+                category: min(
+                    int(receiver_diagnostics.get(category, 0)),
+                    _TELEMETRY_DIAGNOSTIC_COUNTER_MAX,
+                )
+                for category in (
+                    "malformed_json",
+                    "missing_vin",
+                    "unmanaged_vin",
+                    "processing_error",
+                )
+                if isinstance(receiver_diagnostics.get(category, 0), int)
+            }
         capabilities = stored_cache.get("signal_capabilities", {})
         if isinstance(capabilities, dict):
             self._signal_capabilities = {
@@ -908,6 +958,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "vehicles": self.data if isinstance(self.data, dict) else {},
             "metadata": metadata,
             "raw_signals": self._telemetry_raw_signals,
+            "receiver_diagnostics": self.get_telemetry_receiver_diagnostics(),
             "signal_capabilities": self._signal_capabilities,
             "battery_capacity_models": self._battery_capacity_models,
         }
@@ -1028,6 +1079,30 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if temperature is not None:
             active["temp_sum"] = float(active.get("temp_sum", 0.0)) + float(temperature)
             active["temp_count"] = int(active.get("temp_count", 0)) + 1
+
+    def record_battery_charge_state(
+        self, vin: str, charging_state: Any
+    ) -> dict[str, Any]:
+        """Close a live charging run when Fleet Telemetry reports charging stopped."""
+        if not isinstance(charging_state, str):
+            return self._battery_capacity_metrics(vin)
+
+        model = self._battery_capacity_models.get(vin)
+        if not isinstance(model, dict):
+            return self._battery_capacity_metrics(vin)
+
+        is_charging = charging_state.strip().casefold() == "charging"
+        model["is_charging"] = is_charging
+        active = model.get("active_window")
+        if (
+            not is_charging
+            and isinstance(active, dict)
+            and active.get("source") == "live"
+            and active.get("direction") == "charging"
+        ):
+            self._finalize_or_discard_window(vin, active)
+            model["active_window"] = None
+        return self._battery_capacity_metrics(vin)
 
     def flush_active_battery_window(self, vin: str) -> None:
         """Close any open window so a completed run can be scored."""
@@ -1336,6 +1411,12 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             snapshot for snapshot in snapshots if isinstance(snapshot, dict)
         ][:30] if isinstance(snapshots, list) else []
         trend_change_kwh = None
+        trend_stable = False
+        snapshot_capacities = [
+            float(snapshot["usable_capacity_kwh"])
+            for snapshot in recent_snapshots
+            if self._is_finite_number(snapshot.get("usable_capacity_kwh"))
+        ]
         if len(recent_snapshots) >= 2:
             newest_capacity = recent_snapshots[0].get("usable_capacity_kwh")
             oldest_capacity = recent_snapshots[-1].get("usable_capacity_kwh")
@@ -1345,6 +1426,11 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 trend_change_kwh = round(
                     float(newest_capacity) - float(oldest_capacity), 3
                 )
+        if len(snapshot_capacities) >= 7:
+            snapshot_center = float(median(snapshot_capacities))
+            trend_stable = self._median_absolute_deviation(
+                snapshot_capacities, snapshot_center
+            ) <= 1.0
         newest_end = max(
             (window.get("end_time") for window in windows if window.get("end_time")),
             default=None,
@@ -1395,6 +1481,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ),
             "daily_snapshots_30d": recent_snapshots,
             "daily_snapshot_change_30d_kwh": trend_change_kwh,
+            "daily_snapshot_trend_stable": trend_stable,
             "newest_window_age_hours": newest_age_hours,
             "median_absolute_deviation_kwh": (
                 round(self._median_absolute_deviation(capacities, float(estimate)), 3)
@@ -2285,6 +2372,15 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise
 
         self._record_telemetry_registration_result(vin, "registered")
+        pending_vins = self.entry.options.get(
+            CONF_TELEMETRY_REGISTRATION_REQUIRED_VINS, []
+        )
+        if isinstance(pending_vins, list) and vin in pending_vins:
+            options = dict(self.entry.options)
+            options[CONF_TELEMETRY_REGISTRATION_REQUIRED_VINS] = [
+                pending_vin for pending_vin in pending_vins if pending_vin != vin
+            ]
+            self.hass.config_entries.async_update_entry(self.entry, options=options)
         return result
 
     def _record_telemetry_registration_result(self, vin: str, status: str) -> None:

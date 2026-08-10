@@ -115,12 +115,14 @@ class TelemetryConsumer:
             # Extract VIN from the message
             vin = data.get("vin")
             if not vin:
+                self.coordinator.record_telemetry_receiver_error("missing_vin")
                 _LOGGER.warning("Telemetry message missing VIN: %s", topic)
                 return
 
             # Check if this vehicle is managed by us
             vehicle_config = self.coordinator.get_vehicle_config(vin)
             if not vehicle_config:
+                self.coordinator.record_telemetry_receiver_error("unmanaged_vin")
                 _LOGGER.warning("Telemetry for unmanaged vehicle: %s", vin)
                 return
 
@@ -129,8 +131,10 @@ class TelemetryConsumer:
             await self._update_coordinator_data(vin, topic, data)
 
         except json.JSONDecodeError as err:
+            self.coordinator.record_telemetry_receiver_error("malformed_json")
             _LOGGER.warning("Failed to decode telemetry payload: %s", err)
         except Exception as err:
+            self.coordinator.record_telemetry_receiver_error("processing_error")
             _LOGGER.error("Error processing telemetry message: %s", err, exc_info=True)
 
     async def _update_coordinator_data(
@@ -494,6 +498,12 @@ class TelemetryConsumer:
                     temperature_c=temperature_c,
                 )
             )
+        charge_state = response["charge_state"]
+        charge_state.update(
+            self.coordinator.record_battery_charge_state(
+                vin, charge_state.get("charging_state")
+            )
+        )
         self._apply_charging_composites(
             vin,
             response,
