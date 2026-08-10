@@ -80,8 +80,229 @@ def test_records_a_valid_window_and_calculates_soh(
 
     assert coordinator._battery_capacity_metrics(VIN) == {
         "estimated_usable_capacity": 65.0,
-        "battery_soh_confidence": 20.0,
+        "battery_soh_confidence": 100.0,
         "estimated_battery_soh": 88.4,
+    }
+
+
+def test_soc_and_energy_pair_across_separate_telemetry_frames(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Fields sent in separate frames still pair when the companion is fresh."""
+    consumer = TelemetryConsumer(SimpleNamespace(), coordinator)
+    response = coordinator._empty_response()
+
+    async def process_frame(data: list[dict[str, object]], timestamp: str) -> None:
+        await consumer._process_vehicle_signals(
+            VIN, response, {"data": data, "createdAt": timestamp}
+        )
+
+    asyncio.run(
+        process_frame(
+            [{"key": "Soc", "value": {"doubleValue": 70}}],
+            "2026-01-01T00:00:00Z",
+        )
+    )
+    asyncio.run(
+        process_frame(
+            [{"key": "EnergyRemaining", "value": {"doubleValue": 49}}],
+            "2026-01-01T00:00:30Z",
+        )
+    )
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 70.0
+
+
+def test_stale_companion_signal_does_not_pair_across_frames(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A companion field seen too long ago must not be paired as co-temporal."""
+    consumer = TelemetryConsumer(SimpleNamespace(), coordinator)
+    response = coordinator._empty_response()
+
+    async def process_frame(data: list[dict[str, object]], timestamp: str) -> None:
+        await consumer._process_vehicle_signals(
+            VIN, response, {"data": data, "createdAt": timestamp}
+        )
+
+    asyncio.run(
+        process_frame(
+            [{"key": "Soc", "value": {"doubleValue": 70}}],
+            "2026-01-01T00:00:00Z",
+        )
+    )
+    asyncio.run(
+        process_frame(
+            [{"key": "EnergyRemaining", "value": {"doubleValue": 49}}],
+            "2026-01-01T00:05:00Z",
+        )
+    )
+
+    assert coordinator._battery_capacity_metrics(VIN) == {}
+
+
+def test_a_stale_companion_reading_cannot_pair_with_multiple_later_frames(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """One companion reading is consumed on pairing, not reused for later frames."""
+    consumer = TelemetryConsumer(SimpleNamespace(), coordinator)
+    response = coordinator._empty_response()
+
+    async def process_frame(data: list[dict[str, object]], timestamp: str) -> None:
+        await consumer._process_vehicle_signals(
+            VIN, response, {"data": data, "createdAt": timestamp}
+        )
+
+    asyncio.run(
+        process_frame(
+            [{"key": "EnergyRemaining", "value": {"doubleValue": 49}}],
+            "2026-01-01T00:00:00Z",
+        )
+    )
+    asyncio.run(
+        process_frame(
+            [{"key": "Soc", "value": {"doubleValue": 70}}],
+            "2026-01-01T00:00:30Z",
+        )
+    )
+    first_capacity = coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"]
+
+    # The 49 kWh reading has already been consumed; a later Soc-only frame
+    # must not reuse it to fabricate a new capacity sample.
+    asyncio.run(
+        process_frame(
+            [{"key": "Soc", "value": {"doubleValue": 71}}],
+            "2026-01-01T00:00:45Z",
+        )
+    )
+
+    assert first_capacity == 70.0
+    assert (
+        coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 70.0
+    )
+
+    asyncio.run(
+        process_frame(
+            [{"key": "EnergyRemaining", "value": {"doubleValue": 49.5}}],
+            "2026-01-01T00:01:00Z",
+        )
+    )
+    asyncio.run(
+        process_frame(
+            [{"key": "Soc", "value": {"doubleValue": 72}}],
+            "2026-01-01T00:01:05Z",
+        )
+    )
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == round(
+        49.5 / 72 * 100, 2
+    )
+
+
+@pytest.mark.parametrize(
+    ("gap_seconds", "should_pair"),
+    [(120, True), (121, False)],
+)
+def test_cross_frame_pairing_respects_the_max_age_boundary(
+    coordinator: TeslaVehicleCommandCoordinator,
+    gap_seconds: int,
+    should_pair: bool,
+) -> None:
+    """The freshness window is inclusive at its configured maximum age."""
+    consumer = TelemetryConsumer(SimpleNamespace(), coordinator)
+    response = coordinator._empty_response()
+
+    async def process_frame(data: list[dict[str, object]], timestamp: str) -> None:
+        await consumer._process_vehicle_signals(
+            VIN, response, {"data": data, "createdAt": timestamp}
+        )
+
+    asyncio.run(
+        process_frame(
+            [{"key": "Soc", "value": {"doubleValue": 70}}],
+            "2026-01-01T00:00:00Z",
+        )
+    )
+    asyncio.run(
+        process_frame(
+            [{"key": "EnergyRemaining", "value": {"doubleValue": 49}}],
+            f"2026-01-01T00:0{gap_seconds // 60}:{gap_seconds % 60:02d}Z",
+        )
+    )
+
+    metrics = coordinator._battery_capacity_metrics(VIN)
+    if should_pair:
+        assert metrics["estimated_usable_capacity"] == 70.0
+    else:
+        assert metrics == {}
+
+
+def test_out_of_order_frame_does_not_pair_with_a_later_companion_timestamp(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A frame timestamped before its companion must not be treated as fresh."""
+    consumer = TelemetryConsumer(SimpleNamespace(), coordinator)
+    response = coordinator._empty_response()
+
+    async def process_frame(data: list[dict[str, object]], timestamp: str) -> None:
+        await consumer._process_vehicle_signals(
+            VIN, response, {"data": data, "createdAt": timestamp}
+        )
+
+    asyncio.run(
+        process_frame(
+            [{"key": "EnergyRemaining", "value": {"doubleValue": 49}}],
+            "2026-01-01T00:00:30Z",
+        )
+    )
+    asyncio.run(
+        process_frame(
+            [{"key": "Soc", "value": {"doubleValue": 70}}],
+            "2026-01-01T00:00:00Z",
+        )
+    )
+
+    assert coordinator._battery_capacity_metrics(VIN) == {}
+
+
+def test_missing_record_timestamp_prevents_cross_frame_pairing(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Without a parsable createdAt, cross-frame pairing must stay disabled."""
+    consumer = TelemetryConsumer(SimpleNamespace(), coordinator)
+    response = coordinator._empty_response()
+
+    async def process_frame(data: list[dict[str, object]]) -> None:
+        await consumer._process_vehicle_signals(VIN, response, {"data": data})
+
+    asyncio.run(process_frame([{"key": "Soc", "value": {"doubleValue": 70}}]))
+    asyncio.run(
+        process_frame([{"key": "EnergyRemaining", "value": {"doubleValue": 49}}])
+    )
+
+    assert coordinator._battery_capacity_metrics(VIN) == {}
+
+
+def test_live_energy_and_soc_immediately_update_soh(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A fresh BMS energy/SOC pair overrides stale historical window evidence."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"capacity_kwh": 60.0, "delta_soc": 40.0}]
+    }
+
+    coordinator.record_battery_capacity_sample(VIN, 70, 49, observed_at=START)
+
+    assert coordinator._battery_capacity_metrics(VIN) == {
+        "estimated_usable_capacity": 70.0,
+        "battery_soh_confidence": 70.0,
+        "estimated_battery_soh": 95.2,
+    }
+    assert coordinator.get_battery_soh_diagnostics(VIN) == {
+        "usable_capacity_kwh": 70.0,
+        "original_usable_capacity_kwh": 73.5,
+        "estimation_method": "live_energy_soc",
+        "live_capacity_observed_at": START.isoformat(),
     }
 
 
@@ -117,7 +338,7 @@ def test_charge_stop_updates_an_estimate_with_more_weighted_new_evidence(
 
     assert coordinator._battery_capacity_metrics(VIN) == {
         "estimated_usable_capacity": 65.0,
-        "battery_soh_confidence": 50.0,
+        "battery_soh_confidence": 80.0,
         "estimated_battery_soh": 88.4,
     }
 
@@ -486,6 +707,40 @@ def test_reset_battery_history_discards_invalid_window_entries(
     model = coordinator._battery_capacity_models[VIN]
     assert model["accepted_windows"] == [{"source": "live"}]
     assert model["rejected_windows"] == [{"source": "live"}]
+
+
+def test_live_reset_discards_the_transient_live_capacity_observation(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A live reset prevents the latest BMS sample from surviving the reset."""
+    coordinator.record_battery_capacity_sample(VIN, 70, 49, observed_at=START)
+
+    coordinator.reset_battery_capacity_history(VIN, "live")
+
+    assert coordinator._battery_capacity_metrics(VIN) == {}
+    assert "latest_live_capacity_observation" not in coordinator._battery_capacity_models[VIN]
+
+
+def test_invalid_live_capacity_falls_back_to_valid_window_evidence(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A live capacity above the configured original capacity cannot override SOH."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"capacity_kwh": 60.0, "delta_soc": 40.0}],
+        "latest_live_capacity_observation": {
+            "soc": 70.0,
+            "energy": 56.0,
+            "capacity_kwh": 80.0,
+            "timestamp": START.isoformat(),
+        },
+    }
+
+    assert coordinator._battery_capacity_metrics(VIN) == {
+        "estimated_usable_capacity": 60.0,
+        "battery_soh_confidence": 40.0,
+        "estimated_battery_soh": 81.6,
+    }
+    assert coordinator.get_battery_capacity_diagnostics(VIN)["estimation_method"] == "window_slope"
 
 
 def test_capacity_diagnostics_include_sources_ranges_and_rejections(

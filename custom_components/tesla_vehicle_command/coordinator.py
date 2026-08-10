@@ -960,7 +960,15 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "raw_signals": self._telemetry_raw_signals,
             "receiver_diagnostics": self.get_telemetry_receiver_diagnostics(),
             "signal_capabilities": self._signal_capabilities,
-            "battery_capacity_models": self._battery_capacity_models,
+            "battery_capacity_models": {
+                vin: {
+                    key: value
+                    for key, value in model.items()
+                    if key != "latest_live_capacity_observation"
+                }
+                for vin, model in self._battery_capacity_models.items()
+                if isinstance(model, dict)
+            },
         }
 
     def record_battery_capacity_sample(
@@ -998,6 +1006,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         normalized_source = "recorder" if source == "recorder" else "live"
 
         model = self._battery_capacity_models.setdefault(vin, {})
+        if normalized_source == "live" and sample["soc"] > 0:
+            self._record_live_capacity_observation(model, sample)
         if sample["soc"] >= _BATTERY_HIGH_SOC_MIN_PERCENT:
             self._record_high_soc_observation(model, sample, normalized_source)
         active = model.get("active_window")
@@ -1141,6 +1151,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             isinstance(active, dict) and active.get("source") == scope
         ):
             model["active_window"] = None
+        if scope in {"all", "live"}:
+            model.pop("latest_live_capacity_observation", None)
         model["last_reset_scope"] = scope
         model["last_reset"] = datetime.now(timezone.utc).isoformat()
         self._telemetry_store.async_delay_save(self._telemetry_store_payload, 30)
@@ -1252,6 +1264,38 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         observations.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
         model["high_soc_observations"] = observations[:_BATTERY_HIGH_SOC_MAX_OBSERVATIONS]
 
+    @staticmethod
+    def _record_live_capacity_observation(
+        model: dict[str, Any], sample: dict[str, Any]
+    ) -> None:
+        """Store the current BMS-derived usable capacity from one live frame."""
+        model["latest_live_capacity_observation"] = {
+            "soc": round(sample["soc"], 3),
+            "energy": round(sample["energy"], 3),
+            "capacity_kwh": round(sample["energy"] / sample["soc"] * 100, 3),
+            "timestamp": sample["timestamp"],
+        }
+
+    def _latest_live_capacity_observation(
+        self, vin: str, model: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return a valid current BMS-derived capacity observation, if present."""
+        observation = model.get("latest_live_capacity_observation")
+        if not isinstance(observation, dict):
+            return None
+        capacity = observation.get("capacity_kwh")
+        soc = observation.get("soc")
+        if (
+            self._is_finite_number(capacity)
+            and capacity > 0
+            and self._is_finite_number(soc)
+            and 0 < soc <= 100
+            and self._battery_reference_capacity(vin) > 0
+            and capacity <= self._battery_reference_capacity(vin)
+        ):
+            return observation
+        return None
+
     @classmethod
     def _valid_accepted_windows(
         cls, model: dict[str, Any]
@@ -1312,17 +1356,24 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return 0.0
 
     def _battery_capacity_metrics(self, vin: str) -> dict[str, Any]:
-        """Return capacity, SOH, and confidence from accepted windows."""
+        """Return capacity, SOH, and confidence from live telemetry or windows."""
         model = self._battery_capacity_models.get(vin, {})
         windows = self._valid_accepted_windows(model)
-        if not windows:
-            return {}
-        estimate = self._weighted_median_capacity(windows)
+        live_observation = self._latest_live_capacity_observation(vin, model)
+        estimate = (
+            float(live_observation["capacity_kwh"])
+            if live_observation is not None
+            else self._weighted_median_capacity(windows)
+        )
         if estimate is None:
             return {}
         estimated_capacity = round(float(estimate), 2)
         total_soc_span = sum(float(window["delta_soc"]) for window in windows)
-        confidence = round(min(100.0, total_soc_span), 1)
+        confidence = (
+            round(float(live_observation["soc"]), 1)
+            if live_observation is not None
+            else round(min(100.0, total_soc_span), 1)
+        )
         metrics: dict[str, Any] = {
             "estimated_usable_capacity": estimated_capacity,
             "battery_soh_confidence": confidence,
@@ -1359,6 +1410,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return accepted capacity windows and data-quality indicators."""
         model = self._battery_capacity_models.get(vin, {})
         windows = self._valid_accepted_windows(model)
+        live_observation = self._latest_live_capacity_observation(vin, model)
+        estimation_method = (
+            "live_energy_soc" if live_observation is not None else "window_slope"
+        )
         rejected = model.get("rejected_windows")
         rejected_windows = [
             window for window in rejected if isinstance(window, dict)
@@ -1377,6 +1432,17 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "accepted_window_count": 0,
                 "accepted_windows": [],
                 "accepted_window_sources": accepted_source_counts,
+                "estimation_method": estimation_method,
+                "live_capacity_kwh": (
+                    live_observation["capacity_kwh"]
+                    if live_observation is not None
+                    else None
+                ),
+                "live_capacity_observed_at": (
+                    live_observation["timestamp"]
+                    if live_observation is not None
+                    else None
+                ),
                 "rejected_window_count": rejected_count,
                 "rejected_window_sources": rejected_source_counts,
                 "rejected_windows": [
@@ -1392,7 +1458,11 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             }
 
         capacities = [float(window["capacity_kwh"]) for window in windows]
-        estimate = self._weighted_median_capacity(windows)
+        estimate = (
+            float(live_observation["capacity_kwh"])
+            if live_observation is not None
+            else self._weighted_median_capacity(windows)
+        )
         observations = model.get("high_soc_observations")
         high_soc_capacities = [
             float(observation["capacity_kwh"])
@@ -1466,6 +1536,17 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "accepted_window_count": len(windows),
             "accepted_windows": detail,
             "accepted_window_sources": accepted_source_counts,
+            "estimation_method": estimation_method,
+            "live_capacity_kwh": (
+                live_observation["capacity_kwh"]
+                if live_observation is not None
+                else None
+            ),
+            "live_capacity_observed_at": (
+                live_observation["timestamp"]
+                if live_observation is not None
+                else None
+            ),
             "accepted_capacity_min_kwh": round(min(capacities), 3),
             "accepted_capacity_max_kwh": round(max(capacities), 3),
             "high_soc_observation_count": len(high_soc_capacities),
@@ -1505,14 +1586,20 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def get_battery_soh_diagnostics(self, vin: str) -> dict[str, Any]:
         """Return the inputs used to compute Battery SOH."""
         model = self._battery_capacity_models.get(vin, {})
-        windows = self._valid_accepted_windows(model)
-        estimate = self._weighted_median_capacity(windows) if windows else None
+        metrics = self._battery_capacity_metrics(vin)
+        live_observation = self._latest_live_capacity_observation(vin, model)
         reference = self._battery_reference_capacity(vin)
         return {
-            "usable_capacity_kwh": (
-                round(float(estimate), 2) if estimate is not None else None
-            ),
+            "usable_capacity_kwh": metrics.get("estimated_usable_capacity"),
             "original_usable_capacity_kwh": reference if reference > 0 else None,
+            "estimation_method": (
+                "live_energy_soc" if live_observation is not None else "window_slope"
+            ),
+            "live_capacity_observed_at": (
+                live_observation["timestamp"]
+                if live_observation is not None
+                else None
+            ),
         }
 
     def get_battery_confidence_diagnostics(self, vin: str) -> dict[str, Any]:
@@ -1520,9 +1607,17 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         model = self._battery_capacity_models.get(vin, {})
         windows = self._valid_accepted_windows(model)
         total_span = round(sum(float(window["delta_soc"]) for window in windows), 1)
+        live_observation = self._latest_live_capacity_observation(vin, model)
         return {
-            "total_soc_span": total_span,
+            "total_soc_span": (
+                round(float(live_observation["soc"]), 1)
+                if live_observation is not None
+                else total_span
+            ),
             "window_count": len(windows),
+            "estimation_method": (
+                "live_energy_soc" if live_observation is not None else "window_slope"
+            ),
         }
 
     def _migrate_battery_capacity_model(
@@ -1571,7 +1666,13 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         migrated = {
             key: value
             for key, value in model.items()
-            if key not in ("estimates", "anchor", "last_sample", "direction")
+            if key not in (
+                "estimates",
+                "anchor",
+                "last_sample",
+                "direction",
+                "latest_live_capacity_observation",
+            )
         }
         migrated["accepted_windows"] = accepted[-_BATTERY_CAPACITY_MAX_ESTIMATES:]
         rejected = migrated.get("rejected_windows")
@@ -1617,9 +1718,6 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for vehicle in self._vehicles:
             vin = vehicle["vin"]
             model = self._battery_capacity_models.get(vin, {})
-            accepted = model.get("accepted_windows")
-            if isinstance(accepted, list) and accepted:
-                continue
             last_attempt = model.get("history_import_attempted_at")
             if isinstance(last_attempt, str):
                 try:
@@ -1643,12 +1741,25 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not soc_entity_id or not energy_entity_id:
                 continue
 
+            history_start_time = start_time
+            last_import = model.get("history_import_completed_at")
+            if isinstance(last_import, str):
+                try:
+                    last_import_at = datetime.fromisoformat(last_import)
+                except ValueError:
+                    last_import_at = None
+                if last_import_at is not None and last_import_at.tzinfo is not None:
+                    history_start_time = max(
+                        start_time,
+                        last_import_at.astimezone(timezone.utc),
+                    )
+
             try:
                 states = await get_instance(self.hass).async_add_executor_job(
                     partial(
                         history.get_significant_states,
                         hass=self.hass,
-                        start_time=start_time,
+                        start_time=history_start_time,
                         end_time=end_time,
                         entity_ids=[soc_entity_id, energy_entity_id],
                         filters=None,
@@ -1675,12 +1786,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 attempted = True
                 continue
 
-            current_model = self._battery_capacity_models.get(vin, {})
-            current_accepted = current_model.get("accepted_windows")
-            if isinstance(current_accepted, list) and current_accepted:
-                continue
-
             attempted = True
+            current_model = self._battery_capacity_models.setdefault(vin, {})
             if not pairs:
                 current_model["history_import_attempted_at"] = (
                     end_time.isoformat()
@@ -1688,7 +1795,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._battery_capacity_models[vin] = current_model
                 continue
 
-            self._battery_capacity_models.pop(vin, None)
+            active_window = current_model.get("active_window")
+            current_model["active_window"] = None
             for observed_at, soc_percent, energy_remaining_kwh in pairs:
                 self.record_battery_capacity_sample(
                     vin,
@@ -1698,9 +1806,12 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     source="recorder",
                 )
             self.flush_active_battery_window(vin)
+            if isinstance(active_window, dict):
+                current_model["active_window"] = active_window
             metrics = self._battery_capacity_metrics(vin)
             imported_model = self._battery_capacity_models.setdefault(vin, {})
             imported_model["history_import_attempted_at"] = end_time.isoformat()
+            imported_model["history_import_completed_at"] = end_time.isoformat()
             if not metrics:
                 continue
 

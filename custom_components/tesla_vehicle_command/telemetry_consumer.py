@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import zmq
@@ -25,6 +25,10 @@ _BRICK_VOLTAGE_MAX_SIGNAL = "BrickVoltageMax"
 _BRICK_VOLTAGE_MIN_SIGNAL = "BrickVoltageMin"
 _BRICK_VOLTAGE_MAX_INDEX_SIGNAL = "NumBrickVoltageMax"
 _BRICK_VOLTAGE_MIN_INDEX_SIGNAL = "NumBrickVoltageMin"
+# Soc and EnergyRemaining are each configured on a 60s Fleet Telemetry
+# interval but are not guaranteed to arrive in the same message. Allow a
+# same-session pairing across consecutive frames within twice that cadence.
+_BATTERY_SIGNAL_PAIR_MAX_AGE = timedelta(seconds=120)
 
 
 class TelemetryConsumer:
@@ -44,6 +48,7 @@ class TelemetryConsumer:
         self._task: asyncio.Task | None = None
         self._running = False
         self._last_signals_by_vin: dict[str, dict[str, Any]] = {}
+        self._last_signal_seen_at: dict[str, dict[str, datetime]] = {}
         self._last_valid_pack_voltage: float | None = None
 
     async def async_start(self) -> None:
@@ -471,33 +476,68 @@ class TelemetryConsumer:
                     processed_fields.add(signal_name)
 
         received_fields = set(signals)
-        if {"Soc", "EnergyRemaining"}.issubset(processed_fields):
-            charge_state = response["charge_state"]
-            soc_percent = self._to_float(signals.get("Soc"))
-            energy_remaining_kwh = self._to_float(
-                signals.get("EnergyRemaining")
-            )
-            module_temps = [
-                temp
-                for temp in (
-                    self._to_float(signals.get("ModuleTempMax")),
-                    self._to_float(signals.get("ModuleTempMin")),
+        record_time = self._parse_record_timestamp(data)
+        signal_seen_at = self._last_signal_seen_at.setdefault(vin, {})
+        soc_updated = "Soc" in processed_fields
+        energy_updated = "EnergyRemaining" in processed_fields
+        if soc_updated or energy_updated:
+            # A field missing from this frame can still pair with the other
+            # if it was seen recently enough to belong to the same reading.
+            companion_fresh = True
+            companion_signal: str | None = None
+            if soc_updated != energy_updated:
+                companion_signal = "EnergyRemaining" if soc_updated else "Soc"
+                companion_seen_at = signal_seen_at.get(companion_signal)
+                companion_fresh = (
+                    companion_seen_at is not None
+                    and record_time is not None
+                    and timedelta(0)
+                    <= record_time - companion_seen_at
+                    <= _BATTERY_SIGNAL_PAIR_MAX_AGE
                 )
-                if temp is not None
-            ]
-            temperature_c = (
-                sum(module_temps) / len(module_temps) if module_temps else None
-            )
-            charge_state.update(
-                self.coordinator.record_battery_capacity_sample(
-                    vin,
-                    soc_percent,
-                    energy_remaining_kwh,
-                    observed_at=self._parse_record_timestamp(data),
-                    source="live",
-                    temperature_c=temperature_c,
+                if companion_fresh:
+                    # Consume this reading so it cannot pair again with a
+                    # later, different update of the primary signal.
+                    signal_seen_at.pop(companion_signal, None)
+            if companion_fresh:
+                charge_state = response["charge_state"]
+                soc_percent = self._to_float(
+                    signals.get("Soc") if soc_updated else last_signals.get("Soc")
                 )
-            )
+                energy_remaining_kwh = self._to_float(
+                    signals.get("EnergyRemaining")
+                    if energy_updated
+                    else last_signals.get("EnergyRemaining")
+                )
+                if soc_percent is not None and energy_remaining_kwh is not None:
+                    module_temps = [
+                        temp
+                        for temp in (
+                            self._to_float(signals.get("ModuleTempMax")),
+                            self._to_float(signals.get("ModuleTempMin")),
+                        )
+                        if temp is not None
+                    ]
+                    temperature_c = (
+                        sum(module_temps) / len(module_temps)
+                        if module_temps
+                        else None
+                    )
+                    charge_state.update(
+                        self.coordinator.record_battery_capacity_sample(
+                            vin,
+                            soc_percent,
+                            energy_remaining_kwh,
+                            observed_at=record_time,
+                            source="live",
+                            temperature_c=temperature_c,
+                        )
+                    )
+        if record_time is not None:
+            if soc_updated:
+                signal_seen_at["Soc"] = record_time
+            if energy_updated:
+                signal_seen_at["EnergyRemaining"] = record_time
         charge_state = response["charge_state"]
         charge_state.update(
             self.coordinator.record_battery_charge_state(
