@@ -19,6 +19,11 @@ BUTTON_DESCRIPTIONS = [
         icon="mdi:car-wake",
     ),
     ButtonEntityDescription(
+        key="validate_telemetry_setup",
+        name="Validate Telemetry Setup",
+        icon="mdi:transmission-tower-check",
+    ),
+    ButtonEntityDescription(
         key="honk_horn",
         name="Honk Horn",
         icon="mdi:bullhorn",
@@ -121,6 +126,8 @@ class TeslaButtonEntity(TeslaVehicleControlEntity, ButtonEntity):
     @property
     def available(self) -> bool:
         """Return whether this command can be sent."""
+        if self.entity_description.key == "validate_telemetry_setup":
+            return True
         if self.entity_description.key == "wake_up":
             return (
                 self.coordinator.proxy_manager.is_running
@@ -136,6 +143,7 @@ class TeslaButtonEntity(TeslaVehicleControlEntity, ButtonEntity):
         # Map button keys to commands
         command_map = {
             "wake_up": "wake_up",
+            "validate_telemetry_setup": "validate_telemetry_setup",
             "honk_horn": "honk",
             "flash_lights": "flash",
             "open_charge_port": "charge_port_open",
@@ -156,6 +164,8 @@ class TeslaButtonEntity(TeslaVehicleControlEntity, ButtonEntity):
         try:
             if key == "wake_up":
                 await self.coordinator.async_wake_up(self.vin)
+            elif key == "validate_telemetry_setup":
+                self.coordinator.validate_telemetry_setup(self.vin)
             else:
                 await self.coordinator.async_send_command(self.vin, command)
 

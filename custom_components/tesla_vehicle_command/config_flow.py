@@ -32,6 +32,7 @@ from .const import (
     CONF_TELEMETRY_HOSTNAME,
     CONF_TELEMETRY_INACTIVITY_MINUTES,
     CONF_TELEMETRY_PORT,
+    CONF_TELEMETRY_REGISTRATION_REQUIRED_VINS,
     CONF_WAKE_ON_STARTUP,
     CONF_VEHICLES,
     CONF_VIN,
@@ -490,6 +491,16 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                 **self.config_entry.options,
                 **submitted_options,
             }
+            telemetry_changed = any(
+                submitted_options.get(key) != self.config_entry.options.get(key)
+                for key in (CONF_TELEMETRY_HOSTNAME, CONF_TELEMETRY_PORT)
+            )
+            if telemetry_changed:
+                self._pending_options[CONF_TELEMETRY_REGISTRATION_REQUIRED_VINS] = [
+                    vehicle[CONF_VIN]
+                    for vehicle in self.config_entry.data.get(CONF_VEHICLES, [])
+                    if isinstance(vehicle, dict) and isinstance(vehicle.get(CONF_VIN), str)
+                ]
             references = self.config_entry.options.get(
                 CONF_BATTERY_REFERENCE_CAPACITIES, {}
             )

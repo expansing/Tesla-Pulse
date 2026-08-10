@@ -54,6 +54,15 @@ SERVICE_CONFIGURE_FLEET_TELEMETRY_SCHEMA = vol.Schema({
     vol.Required("vin"): cv.string,
 })
 
+SERVICE_RESET_BATTERY_HISTORY_SCHEMA = vol.Schema({
+    vol.Required("vin"): cv.string,
+    vol.Required("scope"): vol.In(["all", "live", "recorder"]),
+})
+
+SERVICE_RESCAN_CAPABILITIES_SCHEMA = vol.Schema({
+    vol.Required("vin"): cv.string,
+})
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Tesla Vehicle Command from a config entry."""
@@ -155,6 +164,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Register the configured Fleet Telemetry destination for a vehicle."""
         await coordinator.async_configure_fleet_telemetry(call.data["vin"])
 
+    def coordinator_for_vin(vin: str) -> TeslaVehicleCommandCoordinator:
+        """Resolve a configured vehicle to its owning config-entry coordinator."""
+        for entry_data in hass.data[DOMAIN].values():
+            owner = entry_data.get("coordinator")
+            if isinstance(owner, TeslaVehicleCommandCoordinator) and owner.get_vehicle_config(
+                vin
+            ):
+                return owner
+        raise ValueError("Vehicle is not configured by Tesla Pulse")
+
+    async def handle_reset_battery_history(call: ServiceCall) -> None:
+        """Discard the selected persisted SOH estimator evidence."""
+        coordinator_for_vin(call.data["vin"]).reset_battery_capacity_history(
+            call.data["vin"], call.data["scope"]
+        )
+
+    async def handle_rescan_capabilities(call: ServiceCall) -> None:
+        """Clear capability conclusions and start a new observation run."""
+        coordinator_for_vin(call.data["vin"]).rescan_capabilities(call.data["vin"])
+
     hass.services.async_register(
         DOMAIN, "set_valet_mode", handle_set_valet_mode, schema=SERVICE_SET_VALET_MODE_SCHEMA
     )
@@ -169,6 +198,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "configure_fleet_telemetry",
         handle_configure_fleet_telemetry,
         schema=SERVICE_CONFIGURE_FLEET_TELEMETRY_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "reset_battery_history",
+        handle_reset_battery_history,
+        schema=SERVICE_RESET_BATTERY_HISTORY_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "rescan_capabilities",
+        handle_rescan_capabilities,
+        schema=SERVICE_RESCAN_CAPABILITIES_SCHEMA,
     )
 
     entry.async_on_unload(entry.add_update_listener(async_update_options))

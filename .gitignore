@@ -9,3 +9,5 @@ TESLA_FLEET_PARTNER_SETUP.md
 !.github/workflows/
 !.github/workflows/*.yml
 .vscode
+.vscode-ctags
+.venv/
