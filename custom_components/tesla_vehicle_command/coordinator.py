@@ -759,7 +759,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self.get_vehicle_config(vin) is None:
             raise ValueError("Vehicle is not configured")
 
-        hostname = self.entry.options.get(CONF_TELEMETRY_HOSTNAME, "").strip()
+hostname_value = self.entry.options.get(CONF_TELEMETRY_HOSTNAME, "")
+hostname = hostname_value.strip() if isinstance(hostname_value, str) else ""
         port = self.entry.options.get(CONF_TELEMETRY_PORT)
         try:
             port_is_valid = 1 <= int(port) <= 65535
