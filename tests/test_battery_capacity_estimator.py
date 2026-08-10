@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from custom_components.tesla_vehicle_command.const import (
 from custom_components.tesla_vehicle_command.coordinator import (
     TeslaVehicleCommandCoordinator,
 )
+from custom_components.tesla_vehicle_command.telemetry_consumer import TelemetryConsumer
 
 VIN = "test-vin"
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -30,6 +32,7 @@ def coordinator() -> TeslaVehicleCommandCoordinator:
     instance.proxy_manager = SimpleNamespace(telemetry_ca_path=None)
     instance._telemetry_store = SimpleNamespace(async_delay_save=lambda *args: None)
     instance._telemetry_raw_signals = {}
+    instance._telemetry_receiver_diagnostics = {}
     instance._signal_capabilities = {}
     instance._capability_valid_signals = {}
     instance._capability_frame_counts = {}
@@ -80,6 +83,178 @@ def test_records_a_valid_window_and_calculates_soh(
         "battery_soh_confidence": 20.0,
         "estimated_battery_soh": 88.4,
     }
+
+
+def test_charge_stop_finalizes_a_qualifying_charging_window(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A live charging stop scores a qualifying run at any configured limit."""
+    coordinator.record_battery_capacity_sample(VIN, 50, 32.5, observed_at=START)
+    coordinator.record_battery_charge_state(VIN, "Charging")
+    coordinator.record_battery_capacity_sample(
+        VIN, 80, 52, observed_at=START + timedelta(hours=2)
+    )
+    coordinator.record_battery_charge_state(VIN, "Stopped")
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.0
+    assert coordinator._battery_capacity_models[VIN]["active_window"] is None
+
+
+def test_charge_stop_updates_an_estimate_with_more_weighted_new_evidence(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A larger live run outweighs a smaller older estimate at any charge limit."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"capacity_kwh": 60.0, "delta_soc": 20.0}]
+    }
+
+    coordinator.record_battery_capacity_sample(VIN, 50, 32.5, observed_at=START)
+    coordinator.record_battery_charge_state(VIN, "Charging")
+    coordinator.record_battery_capacity_sample(
+        VIN, 80, 52, observed_at=START + timedelta(hours=2)
+    )
+    coordinator.record_battery_charge_state(VIN, "Complete")
+
+    assert coordinator._battery_capacity_metrics(VIN) == {
+        "estimated_usable_capacity": 65.0,
+        "battery_soh_confidence": 50.0,
+        "estimated_battery_soh": 88.4,
+    }
+
+
+def test_charge_stop_closes_after_a_sub_epsilon_final_soc_step(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A rounded final SOC change does not defer a completed charge session."""
+    coordinator.record_battery_capacity_sample(VIN, 50, 32.5, observed_at=START)
+    coordinator.record_battery_charge_state(VIN, "Charging")
+    coordinator.record_battery_capacity_sample(
+        VIN, 79.99, 51.9935, observed_at=START + timedelta(hours=2)
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN, 80, 52, observed_at=START + timedelta(hours=2, minutes=1)
+    )
+    coordinator.record_battery_charge_state(VIN, "Stopped")
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.0
+
+
+def test_repeated_charge_stop_frames_do_not_duplicate_capacity_windows(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Repeated stopped states do not re-score the completed charging run."""
+    coordinator.record_battery_capacity_sample(VIN, 50, 32.5, observed_at=START)
+    coordinator.record_battery_charge_state(VIN, "Charging")
+    coordinator.record_battery_capacity_sample(
+        VIN, 80, 52, observed_at=START + timedelta(hours=2)
+    )
+    coordinator.record_battery_charge_state(VIN, "Stopped")
+    coordinator.record_battery_charge_state(VIN, "Stopped")
+
+    assert len(coordinator._battery_capacity_models[VIN]["accepted_windows"]) == 1
+
+
+def test_terminal_charge_state_closes_a_restored_live_charging_window(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A terminal telemetry delta closes a migrated live charging window."""
+    coordinator._battery_capacity_models[VIN] = coordinator._migrate_battery_capacity_model(
+        {
+            "active_window": {
+                "start": {
+                    "soc": 50,
+                    "energy": 32.5,
+                    "timestamp": START.isoformat(),
+                    "temperature": None,
+                },
+                "last": {
+                    "soc": 80,
+                    "energy": 52,
+                    "timestamp": (START + timedelta(hours=2)).isoformat(),
+                    "temperature": None,
+                },
+                "direction": "charging",
+                "reversal_streak": 0,
+                "source": "live",
+                "temp_sum": 0.0,
+                "temp_count": 0,
+            }
+        }
+    )
+    consumer = TelemetryConsumer(SimpleNamespace(), coordinator)
+
+    asyncio.run(
+        consumer._process_vehicle_signals(
+            VIN,
+            coordinator._empty_response(),
+            {
+                "data": [
+                    {
+                        "key": "DetailedChargeState",
+                        "value": {"stringValue": "DetailedChargeStateStopped"},
+                    }
+                ],
+                "createdAt": "2026-01-01T02:01:00Z",
+            },
+        )
+    )
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.0
+    assert coordinator._battery_capacity_models[VIN]["active_window"] is None
+
+
+@pytest.mark.parametrize("terminal_state", ["Stopped", "Complete", "Disconnected"])
+def test_terminal_telemetry_delta_finalizes_a_live_charging_window(
+    coordinator: TeslaVehicleCommandCoordinator,
+    terminal_state: str,
+) -> None:
+    """Typed terminal telemetry closes a live run without a matching SOC frame."""
+    consumer = TelemetryConsumer(SimpleNamespace(), coordinator)
+    response = coordinator._empty_response()
+
+    async def process_frame(data: list[dict[str, object]], timestamp: str) -> None:
+        await consumer._process_vehicle_signals(
+            VIN, response, {"data": data, "createdAt": timestamp}
+        )
+
+    asyncio.run(
+        process_frame(
+            [
+                {
+                    "key": "DetailedChargeState",
+                    "value": {"stringValue": "DetailedChargeStateCharging"},
+                },
+                {"key": "Soc", "value": {"doubleValue": 50}},
+                {"key": "EnergyRemaining", "value": {"doubleValue": 32.5}},
+            ],
+            "2026-01-01T00:00:00Z",
+        )
+    )
+    asyncio.run(
+        process_frame(
+            [
+                {"key": "Soc", "value": {"doubleValue": 80}},
+                {"key": "EnergyRemaining", "value": {"doubleValue": 52}},
+            ],
+            "2026-01-01T02:00:00Z",
+        )
+    )
+    asyncio.run(
+        process_frame(
+            [
+                {
+                    "key": "DetailedChargeState",
+                    "value": {
+                        "stringValue": f"DetailedChargeState{terminal_state}"
+                    },
+                }
+            ],
+            "2026-01-01T02:01:00Z",
+        )
+    )
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.0
+    assert coordinator._battery_capacity_models[VIN]["active_window"] is None
 
 
 def test_weighted_median_prefers_larger_soc_coverage(
@@ -386,6 +561,23 @@ def test_daily_snapshot_replaces_the_current_day(
     assert snapshots[0]["usable_capacity_kwh"] == 64.0
 
 
+def test_daily_snapshot_retention_is_bounded(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Snapshot storage retains the configured newest 400 records per vehicle."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"capacity_kwh": 65.0, "delta_soc": 20.0}],
+        "daily_snapshots": [
+            {"date": f"2025-01-{day:03d}", "usable_capacity_kwh": 64.0}
+            for day in range(1, 401)
+        ],
+    }
+
+    coordinator._record_daily_battery_snapshot(VIN)
+
+    assert len(coordinator._battery_capacity_models[VIN]["daily_snapshots"]) == 400
+
+
 def test_capability_diagnostics_and_rescan_are_explainable(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
@@ -425,6 +617,7 @@ def test_capacity_diagnostics_include_bounded_snapshot_trend(
         {"date": "2026-01-01", "usable_capacity_kwh": 65.0},
     ]
     assert diagnostics["daily_snapshot_change_30d_kwh"] == -1.0
+    assert diagnostics["daily_snapshot_trend_stable"] is False
 
 
 def test_telemetry_update_tracks_bounded_partial_frame_counts(
@@ -440,3 +633,30 @@ def test_telemetry_update_tracks_bounded_partial_frame_counts(
     metadata = coordinator._telemetry_metadata[VIN]
     assert metadata["frame_count"] == 1
     assert metadata["partial_frame_count"] == 1
+
+
+def test_receiver_diagnostics_are_bounded_and_payload_free(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Receiver failures are counted globally without retaining message data."""
+    coordinator.record_telemetry_receiver_error("malformed_json")
+    coordinator.record_telemetry_receiver_error("missing_vin")
+
+    assert coordinator.get_telemetry_receiver_diagnostics() == {
+        "malformed_json": 1,
+        "missing_vin": 1,
+        "unmanaged_vin": 0,
+        "processing_error": 0,
+    }
+
+
+def test_setup_validation_warns_when_telemetry_registration_is_required(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Changing telemetry settings takes precedence over a prior registration."""
+    coordinator.entry.options["telemetry_registration_required_vins"] = [VIN]
+    coordinator._telemetry_metadata[VIN] = {"registration_status": "registered"}
+
+    assert coordinator.get_telemetry_setup_validation(VIN)["registration"] == (
+        "registration_required"
+    )

@@ -60,6 +60,7 @@
           "telemetry_hostname": "Public DNS hostname for the Tesla Fleet Telemetry receiver. Leave blank until the telemetry add-on and public network route are ready.",
           "telemetry_inactivity_minutes": "After this interval without a vehicle telemetry frame, Tesla Pulse marks the vehicle as asleep. Commands wait for a new frame after wake-up before execution.",
           "telemetry_port": "Public TCP port for the Fleet Telemetry receiver.",
+          "telemetry_registration_required_vins": "After changing receiver settings, use Configure Fleet Telemetry for each vehicle to renew its registration.",
           "wake_on_startup": "When enabled, wakes each vehicle and refreshes its state through the Fleet API after Home Assistant starts. When disabled, the last cached telemetry state is restored and the vehicle remains asleep until telemetry arrives.",
           "battery_reference_capacity_kwh": "Original usable pack capacity in kWh. Leave blank to hide SOH while retaining capacity estimates.",
           "battery_reference_capacity_preset": "Optional approximate starting value by model. A value entered above always overrides the preset; presets are not authoritative."
