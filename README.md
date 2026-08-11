@@ -478,8 +478,8 @@ Tesla Pulse estimates current usable battery capacity from `Soc` and `EnergyRema
   $$
 
   The sample that closes a window starts the next one, so accepted windows do not overlap.
-4. **Reject implausible windows.** A window is discarded if the result is outside 10–200 kWh, or if it deviates more than 35% from the current rolling median. Rejected windows are kept only for diagnostics and never affect the reported value.
-5. **Combine recent windows.** Tesla Pulse retains up to the newest 12 accepted windows and reports their **ΔSOC-weighted median** as **Usable Capacity**. Weighting by SOC span gives a long 60-point window more influence than a short 20-point window while remaining resistant to a single bad window.
+4. **Reject implausible windows.** A window is discarded if the result is outside 10–200 kWh, or if it deviates more than 35% from the current rolling median of the recent sessions. Rejected windows are kept only for diagnostics and never affect the reported value.
+5. **Combine recent windows.** Tesla Pulse retains up to the newest 12 accepted windows and reports the **ΔSOC-weighted average** of the 5 most recent as **Usable Capacity**. Weighting by SOC span gives a long 76-point window proportionally more influence than a short 20-point window. A weighted average is used instead of a weighted median so one large, reliable session (such as a near-full charge) is properly reflected rather than being outvoted by several smaller sessions.
 
 To calculate **Battery SOH**, Tesla Pulse compares **Usable Capacity** with the **Original usable capacity** entered in integration options:
 
@@ -525,7 +525,7 @@ The integration provides battery health diagnostics derived from Fleet Telemetry
 | **Brick Voltage Min** | mV | Lowest individual brick voltage in the pack |
 | **Brick Voltage Imbalance** | mV | Difference between max and min brick voltage (ΔV) |
 | **Battery Balance Score** | % | SOC-aware health score (0–100%) |
-| **Usable Capacity** | kWh | SOC-span-weighted capacity estimate blended from the most recent completed sessions |
+| **Usable Capacity** | kWh | SOC-span-weighted average capacity estimate blended from the most recent completed sessions |
 | **Battery SOH** | % | Estimated usable capacity divided by the configured usable capacity when new |
 | **SOH Confidence** | % | Combined SOC span of the recent sessions used, capped at 100% |
 
