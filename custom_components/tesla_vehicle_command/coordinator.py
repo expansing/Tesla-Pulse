@@ -1304,6 +1304,32 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return 0.0
         return float(median([abs(value - center) for value in values]))
 
+    @staticmethod
+    def _parse_window_end_time(window: dict[str, Any]) -> datetime | None:
+        """Return a window's parsed, timezone-aware end_time, if valid."""
+        end_time = window.get("end_time")
+        if not isinstance(end_time, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(end_time)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else None
+
+    @classmethod
+    def _newest_accepted_window(
+        cls, windows: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """Return the accepted window with the most recent valid end_time."""
+        timestamped = [
+            (end_time, window)
+            for window in windows
+            if (end_time := cls._parse_window_end_time(window)) is not None
+        ]
+        if not timestamped:
+            return None
+        return max(timestamped, key=lambda item: item[0])[1]
+
     def _battery_reference_capacity(self, vin: str) -> float:
         """Return the configured usable-when-new capacity, or 0 if unset."""
         references = self.entry.options.get(CONF_BATTERY_REFERENCE_CAPACITIES, {})
@@ -1313,17 +1339,24 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return 0.0
 
     def _battery_capacity_metrics(self, vin: str) -> dict[str, Any]:
-        """Return capacity, SOH, and confidence from accepted session windows."""
+        """Return capacity, SOH, and confidence from the most recent session."""
         model = self._battery_capacity_models.get(vin, {})
         windows = self._valid_accepted_windows(model)
         if not windows:
             return {}
-        estimate = self._weighted_median_capacity(windows)
-        if estimate is None:
-            return {}
-        estimated_capacity = round(float(estimate), 2)
-        total_soc_span = sum(float(window["delta_soc"]) for window in windows)
-        confidence = round(min(100.0, total_soc_span), 1)
+        newest = self._newest_accepted_window(windows)
+        if newest is None:
+            # No window has a reliable timestamp; fall back to the rolling median.
+            estimate = self._weighted_median_capacity(windows)
+            if estimate is None:
+                return {}
+            estimated_capacity = round(float(estimate), 2)
+            confidence = round(
+                min(100.0, sum(float(window["delta_soc"]) for window in windows)), 1
+            )
+        else:
+            estimated_capacity = round(float(newest["capacity_kwh"]), 2)
+            confidence = round(min(100.0, float(newest["delta_soc"])), 1)
         metrics: dict[str, Any] = {
             "estimated_usable_capacity": estimated_capacity,
             "battery_soh_confidence": confidence,
@@ -1436,17 +1469,11 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             trend_stable = self._median_absolute_deviation(
                 snapshot_capacities, snapshot_center
             ) <= 1.0
-        newest_end = max(
-            (window.get("end_time") for window in windows if window.get("end_time")),
-            default=None,
-        )
+        newest_window = self._newest_accepted_window(windows)
         newest_age_hours: float | None = None
-        if isinstance(newest_end, str):
-            try:
-                end_dt = datetime.fromisoformat(newest_end)
-            except ValueError:
-                end_dt = None
-            if end_dt is not None and end_dt.tzinfo is not None:
+        if newest_window is not None:
+            end_dt = self._parse_window_end_time(newest_window)
+            if end_dt is not None:
                 newest_age_hours = round(
                     (datetime.now(timezone.utc) - end_dt).total_seconds() / 3600, 2
                 )
@@ -1517,13 +1544,22 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     def get_battery_confidence_diagnostics(self, vin: str) -> dict[str, Any]:
-        """Return the accepted SOC coverage backing SOH Confidence."""
+        """Return the newest session's SOC coverage backing SOH Confidence."""
         model = self._battery_capacity_models.get(vin, {})
         windows = self._valid_accepted_windows(model)
-        total_span = round(sum(float(window["delta_soc"]) for window in windows), 1)
+        newest = self._newest_accepted_window(windows)
+        historical_total_soc_span = round(
+            sum(float(window["delta_soc"]) for window in windows), 1
+        )
+        newest_span = (
+            round(float(newest["delta_soc"]), 1)
+            if newest is not None
+            else historical_total_soc_span
+        )
         return {
-            "total_soc_span": total_span,
+            "total_soc_span": newest_span,
             "window_count": len(windows),
+            "historical_total_soc_span": historical_total_soc_span,
         }
 
     def _migrate_battery_capacity_model(
