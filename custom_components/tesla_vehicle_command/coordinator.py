@@ -282,6 +282,7 @@ _BATTERY_CAPACITY_MAX_SESSION_GAP = timedelta(hours=6)
 _BATTERY_CAPACITY_MIN_KWH = 10.0
 _BATTERY_CAPACITY_MAX_KWH = 200.0
 _BATTERY_CAPACITY_MAX_ESTIMATES = 12
+_BATTERY_CAPACITY_RECENT_WINDOW_COUNT = 5
 _BATTERY_CAPACITY_SOC_EPSILON = 0.05
 _BATTERY_CAPACITY_REVERSAL_TOLERANCE_PCT = 1.0
 _BATTERY_CAPACITY_REVERSAL_STREAK_LIMIT = 2
@@ -1203,7 +1204,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         current_median = self._weighted_median_capacity(
-            self._valid_accepted_windows(model)
+            self._recent_accepted_windows(self._valid_accepted_windows(model))
         )
         if current_median is not None and current_median > 0:
             deviation = abs(capacity_kwh - current_median) / current_median * 100
@@ -1330,6 +1331,31 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
         return max(timestamped, key=lambda item: item[0])[1]
 
+    @classmethod
+    def _recent_accepted_windows(
+        cls, windows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Return the most recent accepted windows, bounded in count.
+
+        Bounding by recency (rather than a lifetime blend) lets sustained
+        recent measurements move the estimate instead of being permanently
+        diluted by old evidence, while still combining multiple recent
+        sessions so one small or noisy session can't override several large,
+        reliable ones from the same charging weekend.
+        """
+        timestamped = [
+            (end_time, window)
+            for window in windows
+            if (end_time := cls._parse_window_end_time(window)) is not None
+        ]
+        if not timestamped:
+            return list(windows)
+        timestamped.sort(key=lambda item: item[0], reverse=True)
+        return [
+            window
+            for _, window in timestamped[:_BATTERY_CAPACITY_RECENT_WINDOW_COUNT]
+        ]
+
     def _battery_reference_capacity(self, vin: str) -> float:
         """Return the configured usable-when-new capacity, or 0 if unset."""
         references = self.entry.options.get(CONF_BATTERY_REFERENCE_CAPACITIES, {})
@@ -1339,24 +1365,20 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return 0.0
 
     def _battery_capacity_metrics(self, vin: str) -> dict[str, Any]:
-        """Return capacity, SOH, and confidence from the most recent session."""
+        """Return capacity, SOH, and confidence from the most recent sessions."""
         model = self._battery_capacity_models.get(vin, {})
         windows = self._valid_accepted_windows(model)
         if not windows:
             return {}
-        newest = self._newest_accepted_window(windows)
-        if newest is None:
-            # No window has a reliable timestamp; fall back to the rolling median.
-            estimate = self._weighted_median_capacity(windows)
-            if estimate is None:
-                return {}
-            estimated_capacity = round(float(estimate), 2)
-            confidence = round(
-                min(100.0, sum(float(window["delta_soc"]) for window in windows)), 1
-            )
-        else:
-            estimated_capacity = round(float(newest["capacity_kwh"]), 2)
-            confidence = round(min(100.0, float(newest["delta_soc"])), 1)
+        recent_windows = self._recent_accepted_windows(windows)
+        estimate = self._weighted_median_capacity(recent_windows)
+        if estimate is None:
+            return {}
+        estimated_capacity = round(float(estimate), 2)
+        confidence = round(
+            min(100.0, sum(float(window["delta_soc"]) for window in recent_windows)),
+            1,
+        )
         metrics: dict[str, Any] = {
             "estimated_usable_capacity": estimated_capacity,
             "battery_soh_confidence": confidence,
@@ -1430,7 +1452,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             }
 
         capacities = [float(window["capacity_kwh"]) for window in windows]
-        estimate = self._weighted_median_capacity(windows)
+        estimate = self._weighted_median_capacity(self._recent_accepted_windows(windows))
         observations = model.get("high_soc_observations")
         high_soc_capacities = [
             float(observation["capacity_kwh"])
@@ -1496,6 +1518,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ]
         return {
             "accepted_window_count": len(windows),
+            "estimate_window_count": len(self._recent_accepted_windows(windows)),
             "accepted_windows": detail,
             "accepted_window_sources": accepted_source_counts,
             "accepted_capacity_min_kwh": round(min(capacities), 3),
@@ -1544,21 +1567,20 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     def get_battery_confidence_diagnostics(self, vin: str) -> dict[str, Any]:
-        """Return the newest session's SOC coverage backing SOH Confidence."""
+        """Return the recent-session SOC coverage backing SOH Confidence."""
         model = self._battery_capacity_models.get(vin, {})
         windows = self._valid_accepted_windows(model)
-        newest = self._newest_accepted_window(windows)
+        recent_windows = self._recent_accepted_windows(windows)
+        recent_span = round(
+            min(100.0, sum(float(window["delta_soc"]) for window in recent_windows)),
+            1,
+        )
         historical_total_soc_span = round(
             sum(float(window["delta_soc"]) for window in windows), 1
         )
-        newest_span = (
-            round(float(newest["delta_soc"]), 1)
-            if newest is not None
-            else historical_total_soc_span
-        )
         return {
-            "total_soc_span": newest_span,
-            "window_count": len(windows),
+            "total_soc_span": recent_span,
+            "window_count": len(recent_windows),
             "historical_total_soc_span": historical_total_soc_span,
         }
 
