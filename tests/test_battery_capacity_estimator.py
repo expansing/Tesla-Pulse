@@ -80,9 +80,86 @@ def test_records_a_valid_window_and_calculates_soh(
 
     assert coordinator._battery_capacity_metrics(VIN) == {
         "estimated_usable_capacity": 65.0,
-        "battery_soh_confidence": 100.0,
+        "battery_soh_confidence": 20.0,
         "estimated_battery_soh": 88.4,
     }
+
+
+def test_starting_a_new_active_window_does_not_change_the_published_estimate(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A sample that only opens a new window must not alter the published SOH."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [
+            {"capacity_kwh": 65.0, "delta_soc": 40.0, "source": "live"}
+        ]
+    }
+
+    coordinator.record_battery_capacity_sample(VIN, 55, 40, observed_at=START)
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.0
+
+
+def test_small_reversal_jitter_does_not_finalize_the_active_window(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A single opposite-direction step at or below the 1% tolerance is noise."""
+    coordinator.record_battery_capacity_sample(VIN, 50, 32.5, observed_at=START)
+    coordinator.record_battery_capacity_sample(
+        VIN, 60, 39.0, observed_at=START + timedelta(minutes=10)
+    )
+    # A momentary regen-sized dip (0.5% <= 1.0% tolerance) must not close the window.
+    coordinator.record_battery_capacity_sample(
+        VIN, 59.5, 38.7, observed_at=START + timedelta(minutes=11)
+    )
+
+    active = coordinator._battery_capacity_models[VIN]["active_window"]
+    assert active is not None
+    assert active["direction"] == "charging"
+    assert active["reversal_streak"] == 1
+    assert active["last"]["soc"] == 60.0
+    assert active["last"]["energy"] == 39.0
+
+
+def test_repeated_small_reversals_finalize_the_active_window(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A second consecutive small reversal exhausts the noise tolerance streak."""
+    coordinator.record_battery_capacity_sample(VIN, 50, 32.5, observed_at=START)
+    coordinator.record_battery_capacity_sample(
+        VIN, 65, 42.25, observed_at=START + timedelta(minutes=10)
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN, 64.5, 41.925, observed_at=START + timedelta(minutes=11)
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN, 64.0, 41.6, observed_at=START + timedelta(minutes=12)
+    )
+
+    model = coordinator._battery_capacity_models[VIN]
+    new_active = model["active_window"]
+    assert new_active["start"]["soc"] == 64.0
+    assert new_active["direction"] is None
+    assert new_active["reversal_streak"] == 0
+    # The closed run's 15-point span is below the minimum and is dropped silently.
+    assert model.get("accepted_windows", []) == []
+
+
+def test_a_reversal_beyond_tolerance_finalizes_immediately(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A reversal step larger than the tolerance closes the window with no grace."""
+    coordinator.record_battery_capacity_sample(VIN, 50, 32.5, observed_at=START)
+    coordinator.record_battery_capacity_sample(
+        VIN, 70, 45.5, observed_at=START + timedelta(minutes=10)
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN, 68, 44.2, observed_at=START + timedelta(minutes=11)
+    )
+
+    model = coordinator._battery_capacity_models[VIN]
+    assert model["accepted_windows"][0]["capacity_kwh"] == 65.0
+    assert model["active_window"]["start"]["soc"] == 68.0
 
 
 def test_soc_and_energy_pair_across_separate_telemetry_frames(
@@ -110,7 +187,9 @@ def test_soc_and_energy_pair_across_separate_telemetry_frames(
         )
     )
 
-    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 70.0
+    active = coordinator._battery_capacity_models[VIN]["active_window"]
+    assert active["last"]["soc"] == 70.0
+    assert active["last"]["energy"] == 49.0
 
 
 def test_stale_companion_signal_does_not_pair_across_frames(
@@ -165,10 +244,12 @@ def test_a_stale_companion_reading_cannot_pair_with_multiple_later_frames(
             "2026-01-01T00:00:30Z",
         )
     )
-    first_capacity = coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"]
+    active = coordinator._battery_capacity_models[VIN]["active_window"]
+    assert active["last"]["soc"] == 70.0
+    assert active["last"]["energy"] == 49.0
 
     # The 49 kWh reading has already been consumed; a later Soc-only frame
-    # must not reuse it to fabricate a new capacity sample.
+    # must not reuse it to fabricate a new sample.
     asyncio.run(
         process_frame(
             [{"key": "Soc", "value": {"doubleValue": 71}}],
@@ -176,10 +257,9 @@ def test_a_stale_companion_reading_cannot_pair_with_multiple_later_frames(
         )
     )
 
-    assert first_capacity == 70.0
-    assert (
-        coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 70.0
-    )
+    active = coordinator._battery_capacity_models[VIN]["active_window"]
+    assert active["last"]["soc"] == 70.0
+    assert active["last"]["energy"] == 49.0
 
     asyncio.run(
         process_frame(
@@ -194,9 +274,9 @@ def test_a_stale_companion_reading_cannot_pair_with_multiple_later_frames(
         )
     )
 
-    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == round(
-        49.5 / 72 * 100, 2
-    )
+    active = coordinator._battery_capacity_models[VIN]["active_window"]
+    assert active["last"]["soc"] == 72.0
+    assert active["last"]["energy"] == 49.5
 
 
 @pytest.mark.parametrize(
@@ -232,7 +312,9 @@ def test_cross_frame_pairing_respects_the_max_age_boundary(
 
     metrics = coordinator._battery_capacity_metrics(VIN)
     if should_pair:
-        assert metrics["estimated_usable_capacity"] == 70.0
+        active = coordinator._battery_capacity_models[VIN]["active_window"]
+        assert active["last"]["soc"] == 70.0
+        assert active["last"]["energy"] == 49.0
     else:
         assert metrics == {}
 
@@ -283,29 +365,6 @@ def test_missing_record_timestamp_prevents_cross_frame_pairing(
     assert coordinator._battery_capacity_metrics(VIN) == {}
 
 
-def test_live_energy_and_soc_immediately_update_soh(
-    coordinator: TeslaVehicleCommandCoordinator,
-) -> None:
-    """A fresh BMS energy/SOC pair overrides stale historical window evidence."""
-    coordinator._battery_capacity_models[VIN] = {
-        "accepted_windows": [{"capacity_kwh": 60.0, "delta_soc": 40.0}]
-    }
-
-    coordinator.record_battery_capacity_sample(VIN, 70, 49, observed_at=START)
-
-    assert coordinator._battery_capacity_metrics(VIN) == {
-        "estimated_usable_capacity": 70.0,
-        "battery_soh_confidence": 70.0,
-        "estimated_battery_soh": 95.2,
-    }
-    assert coordinator.get_battery_soh_diagnostics(VIN) == {
-        "usable_capacity_kwh": 70.0,
-        "original_usable_capacity_kwh": 73.5,
-        "estimation_method": "live_energy_soc",
-        "live_capacity_observed_at": START.isoformat(),
-    }
-
-
 def test_charge_stop_finalizes_a_qualifying_charging_window(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
@@ -338,7 +397,7 @@ def test_charge_stop_updates_an_estimate_with_more_weighted_new_evidence(
 
     assert coordinator._battery_capacity_metrics(VIN) == {
         "estimated_usable_capacity": 65.0,
-        "battery_soh_confidence": 80.0,
+        "battery_soh_confidence": 50.0,
         "estimated_battery_soh": 88.4,
     }
 
@@ -709,38 +768,16 @@ def test_reset_battery_history_discards_invalid_window_entries(
     assert model["rejected_windows"] == [{"source": "live"}]
 
 
-def test_live_reset_discards_the_transient_live_capacity_observation(
+def test_live_reset_discards_the_active_live_window(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
-    """A live reset prevents the latest BMS sample from surviving the reset."""
+    """A live reset closes an in-progress live window without inventing metrics."""
     coordinator.record_battery_capacity_sample(VIN, 70, 49, observed_at=START)
 
     coordinator.reset_battery_capacity_history(VIN, "live")
 
     assert coordinator._battery_capacity_metrics(VIN) == {}
-    assert "latest_live_capacity_observation" not in coordinator._battery_capacity_models[VIN]
-
-
-def test_invalid_live_capacity_falls_back_to_valid_window_evidence(
-    coordinator: TeslaVehicleCommandCoordinator,
-) -> None:
-    """A live capacity above the configured original capacity cannot override SOH."""
-    coordinator._battery_capacity_models[VIN] = {
-        "accepted_windows": [{"capacity_kwh": 60.0, "delta_soc": 40.0}],
-        "latest_live_capacity_observation": {
-            "soc": 70.0,
-            "energy": 56.0,
-            "capacity_kwh": 80.0,
-            "timestamp": START.isoformat(),
-        },
-    }
-
-    assert coordinator._battery_capacity_metrics(VIN) == {
-        "estimated_usable_capacity": 60.0,
-        "battery_soh_confidence": 40.0,
-        "estimated_battery_soh": 81.6,
-    }
-    assert coordinator.get_battery_capacity_diagnostics(VIN)["estimation_method"] == "window_slope"
+    assert coordinator._battery_capacity_models[VIN]["active_window"] is None
 
 
 def test_capacity_diagnostics_include_sources_ranges_and_rejections(
