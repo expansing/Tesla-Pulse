@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -550,6 +551,19 @@ def test_weighted_median_prefers_larger_soc_coverage(
     assert coordinator._weighted_median_capacity(windows) == 65.0
 
 
+def test_weighted_average_capacity_handles_empty_and_unweighted_input(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """The published estimator's helper handles its own edge cases directly."""
+    assert coordinator._weighted_average_capacity([]) is None
+
+    unweighted = [
+        {"capacity_kwh": 60.0, "delta_soc": 0.0},
+        {"capacity_kwh": 70.0, "delta_soc": 0.0},
+    ]
+    assert coordinator._weighted_average_capacity(unweighted) == 65.0
+
+
 def test_published_estimate_reflects_recent_sessions_not_a_mass_of_old_evidence(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
@@ -590,7 +604,7 @@ def test_missing_end_time_on_every_window_falls_back_to_the_rolling_median(
     assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.0
 
 
-def test_tied_end_time_is_handled_deterministically_by_the_weighted_median(
+def test_tied_end_time_is_handled_deterministically_by_the_weighted_average(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
     """Windows sharing the same end_time still combine deterministically."""
@@ -608,7 +622,7 @@ def test_tied_end_time_is_handled_deterministically_by_the_weighted_median(
         },
     ]
 
-    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.6
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 63.89
 
 
 def test_recorder_window_with_later_end_time_outranks_an_older_live_window(
@@ -631,7 +645,7 @@ def test_recorder_window_with_later_end_time_outranks_an_older_live_window(
         },
     ]
 
-    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.6
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 63.89
 
 
 def test_live_window_with_later_end_time_outranks_an_older_recorder_window(
@@ -654,7 +668,7 @@ def test_live_window_with_later_end_time_outranks_an_older_recorder_window(
         },
     ]
 
-    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.6
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 63.89
 
 
 def test_confidence_diagnostics_report_recent_span_and_historical_total(
@@ -707,7 +721,7 @@ def test_confidence_diagnostics_fall_back_to_historical_total_without_a_timestam
 def test_one_small_session_cannot_override_several_large_recent_charges(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
-    """A single small later session must not outweigh a weekend of large charges."""
+    """A single small later session must not dominate a weekend of large charges."""
     for day in range(1, 4):
         _record_window(
             coordinator,
@@ -717,7 +731,8 @@ def test_one_small_session_cannot_override_several_large_recent_charges(
             64.35,
             START + timedelta(days=day),
         )
-    # A short drive right after the last big charge should not hijack the estimate.
+    # A short drive right after the last big charge should only partly, not
+    # substantially, pull the estimate away from the large reliable sessions.
     _record_window(
         coordinator,
         90,
@@ -727,7 +742,33 @@ def test_one_small_session_cannot_override_several_large_recent_charges(
         START + timedelta(days=3, hours=1),
     )
 
-    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.0
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 64.18
+
+
+def test_a_large_reliable_session_is_not_suppressed_by_several_smaller_ones(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A weighted median can hide a large session; the weighted average cannot."""
+    model = coordinator._battery_capacity_models.setdefault(VIN, {})
+    smaller_sessions = [
+        {"capacity_kwh": 62.0, "delta_soc": 22.0, "end_time": f"2026-01-0{day}T00:00:00+00:00"}
+        for day in range(1, 5)
+    ]
+    large_reliable_session = {
+        "capacity_kwh": 65.18,
+        "delta_soc": 76.0,
+        "end_time": "2026-01-05T00:00:00+00:00",
+    }
+    windows = smaller_sessions + [large_reliable_session]
+    model["accepted_windows"] = windows
+
+    # The weighted median would still return 62.0 here: the four smaller
+    # sessions' combined weight (88) crosses half of the total (82) before
+    # the large 76-point session is ever reached in sorted order.
+    assert coordinator._weighted_median_capacity(windows) == 62.0
+
+    # The published estimate must not reproduce that suppression.
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 63.47
 
 
 def test_capacity_diagnostics_expose_how_many_windows_back_the_estimate(
@@ -1188,6 +1229,82 @@ def test_capacity_diagnostics_include_bounded_snapshot_trend(
     ]
     assert diagnostics["daily_snapshot_change_30d_kwh"] == -1.0
     assert diagnostics["daily_snapshot_trend_stable"] is False
+
+
+def _snapshots_with_symmetric_noise(center: float, spread: float) -> list[dict[str, Any]]:
+    """Return 7 daily snapshots whose median absolute deviation equals spread."""
+    values = [
+        center - spread,
+        center - spread,
+        center - spread,
+        center,
+        center + spread,
+        center + spread,
+        center + spread,
+    ]
+    return [
+        {"date": f"2026-01-0{day}", "usable_capacity_kwh": value}
+        for day, value in enumerate(values, start=1)
+    ]
+
+
+def test_trend_stability_treats_a_small_and_a_large_pack_the_same_relative_noise(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """The same 1.4% noise level is judged identically for a 50 kWh and 100 kWh pack."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"capacity_kwh": 50.0, "delta_soc": 20.0}],
+        "daily_snapshots": _snapshots_with_symmetric_noise(50.0, 0.7),
+    }
+    small_pack_stable = coordinator.get_battery_capacity_diagnostics(VIN)[
+        "daily_snapshot_trend_stable"
+    ]
+
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"capacity_kwh": 100.0, "delta_soc": 20.0}],
+        "daily_snapshots": _snapshots_with_symmetric_noise(100.0, 1.4),
+    }
+    large_pack_stable = coordinator.get_battery_capacity_diagnostics(VIN)[
+        "daily_snapshot_trend_stable"
+    ]
+
+    assert small_pack_stable is True
+    assert large_pack_stable is True
+
+
+def test_trend_stability_is_not_marked_unstable_by_a_fixed_kwh_threshold(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A larger pack with small relative noise is not wrongly marked unstable.
+
+    Under a fixed 1.0 kWh threshold, this 1.4 kWh deviation on a 100 kWh pack
+    (1.4% relative noise) would have been marked unstable even though it is
+    proportionally tighter than the 0.7 kWh/50 kWh case above.
+    """
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"capacity_kwh": 100.0, "delta_soc": 20.0}],
+        "daily_snapshots": _snapshots_with_symmetric_noise(100.0, 1.4),
+    }
+
+    assert (
+        coordinator.get_battery_capacity_diagnostics(VIN)["daily_snapshot_trend_stable"]
+        is True
+    )
+
+
+def test_trend_stability_rejects_noise_above_the_relative_threshold(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Noise exceeding 1.5% of the pack's own capacity is still marked unstable."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"capacity_kwh": 50.0, "delta_soc": 20.0}],
+        "daily_snapshots": _snapshots_with_symmetric_noise(50.0, 0.8),
+    }
+
+    assert (
+        coordinator.get_battery_capacity_diagnostics(VIN)["daily_snapshot_trend_stable"]
+        is False
+    )
 
 
 def test_telemetry_update_tracks_bounded_partial_frame_counts(

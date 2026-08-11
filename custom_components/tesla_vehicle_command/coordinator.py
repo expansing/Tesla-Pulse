@@ -293,6 +293,7 @@ _BATTERY_HIGH_SOC_MIN_PERCENT = 95.0
 _BATTERY_HIGH_SOC_MAX_OBSERVATIONS = 12
 _BATTERY_HIGH_SOC_WARNING_DEVIATION_PCT = 10.0
 _BATTERY_SNAPSHOT_MAX_DAYS = 400
+_BATTERY_TREND_STABILITY_MAD_PCT = 1.5
 _TELEMETRY_DIAGNOSTIC_COUNTER_MAX = 10_000
 _BATTERY_HISTORY_LOOKBACK = timedelta(days=30)
 _BATTERY_HISTORY_PAIR_TOLERANCE = timedelta(seconds=2)
@@ -1281,7 +1282,14 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _weighted_median_capacity(
         windows: list[dict[str, Any]],
     ) -> float | None:
-        """Return the ΔSOC-weighted median capacity across windows."""
+        """Return the ΔSOC-weighted median capacity across windows.
+
+        Used only as the noise-rejection baseline when accepting a new
+        session; it is deliberately not used for the published estimate
+        because a handful of smaller sessions can outvote one large,
+        far more reliable session even though no individual smaller
+        session outweighs it.
+        """
         if not windows:
             return None
         ordered = sorted(windows, key=lambda item: float(item["capacity_kwh"]))
@@ -1295,6 +1303,30 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if cumulative >= half_weight:
                 return float(window["capacity_kwh"])
         return float(ordered[-1]["capacity_kwh"])
+
+    @staticmethod
+    def _weighted_average_capacity(
+        windows: list[dict[str, Any]],
+    ) -> float | None:
+        """Return the ΔSOC-weighted average capacity across windows.
+
+        Each session contributes in direct proportion to its own SOC
+        span, so a large, reliable session (e.g. a near-full charge)
+        is properly reflected instead of being outvoted by the
+        combined weight of several smaller sessions.
+        """
+        if not windows:
+            return None
+        total_weight = sum(float(window["delta_soc"]) for window in windows)
+        if total_weight <= 0:
+            return sum(float(window["capacity_kwh"]) for window in windows) / len(
+                windows
+            )
+        weighted_sum = sum(
+            float(window["capacity_kwh"]) * float(window["delta_soc"])
+            for window in windows
+        )
+        return weighted_sum / total_weight
 
     @staticmethod
     def _median_absolute_deviation(
@@ -1371,7 +1403,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not windows:
             return {}
         recent_windows = self._recent_accepted_windows(windows)
-        estimate = self._weighted_median_capacity(recent_windows)
+        estimate = self._weighted_average_capacity(recent_windows)
         if estimate is None:
             return {}
         estimated_capacity = round(float(estimate), 2)
@@ -1452,7 +1484,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             }
 
         capacities = [float(window["capacity_kwh"]) for window in windows]
-        estimate = self._weighted_median_capacity(self._recent_accepted_windows(windows))
+        estimate = self._weighted_average_capacity(self._recent_accepted_windows(windows))
         observations = model.get("high_soc_observations")
         high_soc_capacities = [
             float(observation["capacity_kwh"])
@@ -1488,9 +1520,16 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
         if len(snapshot_capacities) >= 7:
             snapshot_center = float(median(snapshot_capacities))
-            trend_stable = self._median_absolute_deviation(
-                snapshot_capacities, snapshot_center
-            ) <= 1.0
+            if snapshot_center > 0:
+                stability_threshold = (
+                    snapshot_center * _BATTERY_TREND_STABILITY_MAD_PCT / 100
+                )
+                trend_stable = (
+                    self._median_absolute_deviation(
+                        snapshot_capacities, snapshot_center
+                    )
+                    <= stability_threshold
+                )
         newest_window = self._newest_accepted_window(windows)
         newest_age_hours: float | None = None
         if newest_window is not None:
