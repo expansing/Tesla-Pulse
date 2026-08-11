@@ -279,6 +279,7 @@ _TELEMETRY_STORE_VERSION = 2
 _COMMAND_STATE_CONFIRMATION_TIMEOUT = timedelta(seconds=30)
 _BATTERY_CAPACITY_MIN_SOC_SPAN = 20.0
 _BATTERY_CAPACITY_MAX_SESSION_GAP = timedelta(hours=6)
+_BATTERY_WINDOW_ANCHOR_MAX_AGE = timedelta(minutes=15)
 _BATTERY_CAPACITY_MIN_KWH = 10.0
 _BATTERY_CAPACITY_MAX_KWH = 200.0
 _BATTERY_CAPACITY_MAX_ESTIMATES = 12
@@ -1003,6 +1004,20 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         model = self._battery_capacity_models.setdefault(vin, {})
         if sample["soc"] >= _BATTERY_HIGH_SOC_MIN_PERCENT:
             self._record_high_soc_observation(model, sample, normalized_source)
+
+        if normalized_source == "live":
+            # Live windows are bounded solely by charge-state transitions (see
+            # record_battery_charge_state) so a session's start/end values are
+            # never taken from a sample that may be offset from the true SOC
+            # at that exact moment. This just tracks the freshest known pair
+            # and lazily anchors a window if the current mode has none yet
+            # (e.g. recovering after a transition whose anchor was too stale).
+            model["latest_live_sample"] = sample
+            mode = model.get("charging_state_mode")
+            if mode is not None and not isinstance(model.get("live_window"), dict):
+                model["live_window"] = self._new_live_window(sample, mode)
+            return self._battery_capacity_metrics(vin)
+
         active = model.get("active_window")
         if not isinstance(active, dict):
             model["active_window"] = self._new_active_window(sample, normalized_source)
@@ -1083,28 +1098,94 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             active["temp_sum"] = float(active.get("temp_sum", 0.0)) + float(temperature)
             active["temp_count"] = int(active.get("temp_count", 0)) + 1
 
+    @staticmethod
+    def _new_live_window(sample: dict[str, Any], mode: str) -> dict[str, Any]:
+        """Return a charge-state-anchored window pinned to one boundary sample.
+
+        Unlike a recorder window, a live window is never extended sample by
+        sample: its "last" value is only ever overwritten once, by the fresh
+        sample that closes it at the next charge-state transition.
+        """
+        temperature = sample.get("temperature")
+        return {
+            "start": dict(sample),
+            "last": dict(sample),
+            "direction": "charging" if mode == "charging" else "discharging",
+            "source": "live",
+            "temp_sum": float(temperature) if temperature is not None else 0.0,
+            "temp_count": 1 if temperature is not None else 0,
+        }
+
+    @staticmethod
+    def _is_recent_enough(sample: dict[str, Any], reference_time: datetime) -> bool:
+        """Return whether a sample is close enough to reference_time to trust
+        as the SOC/energy pair at that moment, guarding against a stale or
+        out-of-order pairing being used as a session boundary.
+        """
+        try:
+            sample_time = datetime.fromisoformat(sample["timestamp"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if sample_time.tzinfo is None:
+            return False
+        return abs(reference_time - sample_time) <= _BATTERY_WINDOW_ANCHOR_MAX_AGE
+
     def record_battery_charge_state(
-        self, vin: str, charging_state: Any
+        self,
+        vin: str,
+        charging_state: Any,
+        observed_at: datetime | None = None,
     ) -> dict[str, Any]:
-        """Close a live charging run when Fleet Telemetry reports charging stopped."""
+        """Track charging/resting sessions bounded solely by charge-state.
+
+        A charging window spans exactly from charging-start to charging-end.
+        A resting window spans from charging-end to the next charging-start,
+        covering the full off-charger period (driving, parking, and standby
+        drain) as one session, since intermediate telemetry while parked may
+        be sparse or delayed. Each boundary uses the freshest known live
+        SOC/energy pair rather than accumulating through intermediate
+        samples, so a session's endpoints are never built from values that
+        may be offset in time from each other.
+        """
         if not isinstance(charging_state, str):
             return self._battery_capacity_metrics(vin)
 
-        model = self._battery_capacity_models.get(vin)
-        if not isinstance(model, dict):
+        model = self._battery_capacity_models.setdefault(vin, {})
+        is_charging = charging_state.strip().casefold() == "charging"
+        new_mode = "charging" if is_charging else "resting"
+        previous_mode = model.get("charging_state_mode")
+        model["charging_state_mode"] = new_mode
+
+        anchor = model.get("latest_live_sample")
+        if previous_mode is None:
+            # First observed state; nothing to close yet.
+            if isinstance(anchor, dict) and not isinstance(model.get("live_window"), dict):
+                model["live_window"] = self._new_live_window(anchor, new_mode)
             return self._battery_capacity_metrics(vin)
 
-        is_charging = charging_state.strip().casefold() == "charging"
-        model["is_charging"] = is_charging
-        active = model.get("active_window")
-        if (
-            not is_charging
-            and isinstance(active, dict)
-            and active.get("source") == "live"
-            and active.get("direction") == "charging"
-        ):
-            self._finalize_or_discard_window(vin, active)
-            model["active_window"] = None
+        if new_mode == previous_mode:
+            return self._battery_capacity_metrics(vin)
+
+        anchor_is_fresh = (
+            isinstance(anchor, dict)
+            and observed_at is not None
+            and self._is_recent_enough(anchor, observed_at)
+        )
+        current_window = model.get("live_window")
+        if isinstance(current_window, dict) and anchor_is_fresh:
+            current_window["last"] = dict(anchor)
+            temperature = anchor.get("temperature")
+            if temperature is not None:
+                current_window["temp_sum"] = (
+                    float(current_window.get("temp_sum", 0.0)) + float(temperature)
+                )
+                current_window["temp_count"] = (
+                    int(current_window.get("temp_count", 0)) + 1
+                )
+            self._finalize_or_discard_window(vin, current_window)
+        model["live_window"] = (
+            self._new_live_window(anchor, new_mode) if anchor_is_fresh else None
+        )
         return self._battery_capacity_metrics(vin)
 
     def flush_active_battery_window(self, vin: str) -> None:
@@ -1144,6 +1225,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             isinstance(active, dict) and active.get("source") == scope
         ):
             model["active_window"] = None
+        if scope in ("all", "live"):
+            model["live_window"] = None
+            model.pop("latest_live_sample", None)
+            model.pop("charging_state_mode", None)
         model["last_reset_scope"] = scope
         model["last_reset"] = datetime.now(timezone.utc).isoformat()
         self._telemetry_store.async_delay_save(self._telemetry_store_payload, 30)
@@ -1675,8 +1760,19 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "last_sample",
                 "direction",
                 "latest_live_capacity_observation",
+                "is_charging",
             )
         }
+        # A live window from before charge-state-bounded windowing existed
+        # cannot be scored by either mechanism going forward; carry it over
+        # as the starting point for the new live window instead of losing it.
+        legacy_active = migrated.get("active_window")
+        if isinstance(legacy_active, dict) and legacy_active.get("source") == "live":
+            migrated["live_window"] = legacy_active
+            migrated["active_window"] = None
+            migrated["charging_state_mode"] = (
+                "charging" if legacy_active.get("direction") == "charging" else "resting"
+            )
         migrated["accepted_windows"] = accepted[-_BATTERY_CAPACITY_MAX_ESTIMATES:]
         rejected = migrated.get("rejected_windows")
         migrated["rejected_windows"] = (
