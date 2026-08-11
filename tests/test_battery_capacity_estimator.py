@@ -397,7 +397,7 @@ def test_charge_stop_updates_an_estimate_with_more_weighted_new_evidence(
 
     assert coordinator._battery_capacity_metrics(VIN) == {
         "estimated_usable_capacity": 65.0,
-        "battery_soh_confidence": 50.0,
+        "battery_soh_confidence": 30.0,
         "estimated_battery_soh": 88.4,
     }
 
@@ -540,7 +540,43 @@ def test_terminal_telemetry_delta_finalizes_a_live_charging_window(
 def test_weighted_median_prefers_larger_soc_coverage(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
-    """The estimate uses SOC span as the window weight rather than an average."""
+    """The rolling median (used for outlier rejection) weighs windows by SOC span."""
+    windows = [
+        {"capacity_kwh": 60.0, "delta_soc": 20.0},
+        {"capacity_kwh": 65.0, "delta_soc": 60.0},
+        {"capacity_kwh": 70.0, "delta_soc": 20.0},
+    ]
+
+    assert coordinator._weighted_median_capacity(windows) == 65.0
+
+
+def test_published_estimate_reflects_the_newest_session_not_the_median(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A recent session must move the published SOH past a mass of older evidence."""
+    model = coordinator._battery_capacity_models.setdefault(VIN, {})
+    model["accepted_windows"] = [
+        {
+            "capacity_kwh": 61.83,
+            "delta_soc": 25.0,
+            "end_time": "2026-01-01T00:00:00+00:00",
+        }
+        for _ in range(8)
+    ] + [
+        {
+            "capacity_kwh": 65.6,
+            "delta_soc": 30.0,
+            "end_time": "2026-01-08T00:00:00+00:00",
+        }
+    ]
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.6
+
+
+def test_missing_end_time_on_every_window_falls_back_to_the_rolling_median(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Without any reliable timestamp, the estimate falls back to a robust median."""
     model = coordinator._battery_capacity_models.setdefault(VIN, {})
     model["accepted_windows"] = [
         {"capacity_kwh": 60.0, "delta_soc": 20.0},
@@ -549,6 +585,115 @@ def test_weighted_median_prefers_larger_soc_coverage(
     ]
 
     assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.0
+
+
+def test_tied_end_time_does_not_crash_and_picks_one_of_the_tied_windows(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Windows sharing the same end_time resolve deterministically, without error."""
+    model = coordinator._battery_capacity_models.setdefault(VIN, {})
+    model["accepted_windows"] = [
+        {
+            "capacity_kwh": 61.83,
+            "delta_soc": 25.0,
+            "end_time": "2026-01-01T00:00:00+00:00",
+        },
+        {
+            "capacity_kwh": 65.6,
+            "delta_soc": 30.0,
+            "end_time": "2026-01-01T00:00:00+00:00",
+        },
+    ]
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 61.83
+
+
+def test_recorder_window_with_later_end_time_outranks_an_older_live_window(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Source is metadata only; the newest window wins regardless of source."""
+    model = coordinator._battery_capacity_models.setdefault(VIN, {})
+    model["accepted_windows"] = [
+        {
+            "capacity_kwh": 61.83,
+            "delta_soc": 25.0,
+            "end_time": "2026-01-01T00:00:00+00:00",
+            "source": "live",
+        },
+        {
+            "capacity_kwh": 65.6,
+            "delta_soc": 30.0,
+            "end_time": "2026-01-08T00:00:00+00:00",
+            "source": "recorder",
+        },
+    ]
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.6
+
+
+def test_live_window_with_later_end_time_outranks_an_older_recorder_window(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Source is metadata only; the newest window wins regardless of source."""
+    model = coordinator._battery_capacity_models.setdefault(VIN, {})
+    model["accepted_windows"] = [
+        {
+            "capacity_kwh": 61.83,
+            "delta_soc": 25.0,
+            "end_time": "2026-01-01T00:00:00+00:00",
+            "source": "recorder",
+        },
+        {
+            "capacity_kwh": 65.6,
+            "delta_soc": 30.0,
+            "end_time": "2026-01-08T00:00:00+00:00",
+            "source": "live",
+        },
+    ]
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.6
+
+
+def test_confidence_diagnostics_report_newest_span_and_historical_total(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Confidence diagnostics expose both the newest span and the lifetime total."""
+    model = coordinator._battery_capacity_models.setdefault(VIN, {})
+    model["accepted_windows"] = [
+        {
+            "capacity_kwh": 61.83,
+            "delta_soc": 25.0,
+            "end_time": "2026-01-01T00:00:00+00:00",
+        },
+        {
+            "capacity_kwh": 65.6,
+            "delta_soc": 30.0,
+            "end_time": "2026-01-08T00:00:00+00:00",
+        },
+    ]
+
+    assert coordinator.get_battery_confidence_diagnostics(VIN) == {
+        "total_soc_span": 30.0,
+        "window_count": 2,
+        "historical_total_soc_span": 55.0,
+    }
+
+
+def test_confidence_diagnostics_fall_back_to_historical_total_without_a_timestamp(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Without any reliable end_time, confidence reports the historical total."""
+    model = coordinator._battery_capacity_models.setdefault(VIN, {})
+    model["accepted_windows"] = [
+        {"capacity_kwh": 60.0, "delta_soc": 20.0},
+        {"capacity_kwh": 65.0, "delta_soc": 30.0},
+    ]
+
+    assert coordinator.get_battery_confidence_diagnostics(VIN) == {
+        "total_soc_span": 50.0,
+        "window_count": 2,
+        "historical_total_soc_span": 50.0,
+    }
 
 
 def test_rejects_capacity_far_from_rolling_median(
