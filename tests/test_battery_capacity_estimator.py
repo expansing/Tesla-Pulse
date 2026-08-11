@@ -550,25 +550,28 @@ def test_weighted_median_prefers_larger_soc_coverage(
     assert coordinator._weighted_median_capacity(windows) == 65.0
 
 
-def test_published_estimate_reflects_the_newest_session_not_the_median(
+def test_published_estimate_reflects_recent_sessions_not_a_mass_of_old_evidence(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
-    """A recent session must move the published SOH past a mass of older evidence."""
+    """Enough recent sessions must move the published SOH past older evidence."""
     model = coordinator._battery_capacity_models.setdefault(VIN, {})
-    model["accepted_windows"] = [
+    old_sessions = [
         {
             "capacity_kwh": 61.83,
             "delta_soc": 25.0,
-            "end_time": "2026-01-01T00:00:00+00:00",
+            "end_time": f"2026-01-0{day}T00:00:00+00:00",
         }
-        for _ in range(8)
-    ] + [
+        for day in range(1, 9)
+    ]
+    recent_sessions = [
         {
             "capacity_kwh": 65.6,
             "delta_soc": 30.0,
-            "end_time": "2026-01-08T00:00:00+00:00",
+            "end_time": f"2026-02-0{day}T00:00:00+00:00",
         }
+        for day in range(1, 6)
     ]
+    model["accepted_windows"] = old_sessions + recent_sessions
 
     assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.6
 
@@ -587,10 +590,10 @@ def test_missing_end_time_on_every_window_falls_back_to_the_rolling_median(
     assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.0
 
 
-def test_tied_end_time_does_not_crash_and_picks_one_of_the_tied_windows(
+def test_tied_end_time_is_handled_deterministically_by_the_weighted_median(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
-    """Windows sharing the same end_time resolve deterministically, without error."""
+    """Windows sharing the same end_time still combine deterministically."""
     model = coordinator._battery_capacity_models.setdefault(VIN, {})
     model["accepted_windows"] = [
         {
@@ -605,7 +608,7 @@ def test_tied_end_time_does_not_crash_and_picks_one_of_the_tied_windows(
         },
     ]
 
-    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 61.83
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.6
 
 
 def test_recorder_window_with_later_end_time_outranks_an_older_live_window(
@@ -654,28 +657,33 @@ def test_live_window_with_later_end_time_outranks_an_older_recorder_window(
     assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.6
 
 
-def test_confidence_diagnostics_report_newest_span_and_historical_total(
+def test_confidence_diagnostics_report_recent_span_and_historical_total(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
-    """Confidence diagnostics expose both the newest span and the lifetime total."""
+    """Confidence diagnostics expose the recent span and the lifetime total."""
     model = coordinator._battery_capacity_models.setdefault(VIN, {})
-    model["accepted_windows"] = [
+    old_sessions = [
         {
             "capacity_kwh": 61.83,
             "delta_soc": 25.0,
-            "end_time": "2026-01-01T00:00:00+00:00",
-        },
+            "end_time": f"2026-01-0{day}T00:00:00+00:00",
+        }
+        for day in range(1, 3)
+    ]
+    recent_sessions = [
         {
             "capacity_kwh": 65.6,
             "delta_soc": 30.0,
-            "end_time": "2026-01-08T00:00:00+00:00",
-        },
+            "end_time": f"2026-02-0{day}T00:00:00+00:00",
+        }
+        for day in range(1, 6)
     ]
+    model["accepted_windows"] = old_sessions + recent_sessions
 
     assert coordinator.get_battery_confidence_diagnostics(VIN) == {
-        "total_soc_span": 30.0,
-        "window_count": 2,
-        "historical_total_soc_span": 55.0,
+        "total_soc_span": 100.0,
+        "window_count": 5,
+        "historical_total_soc_span": 200.0,
     }
 
 
@@ -694,6 +702,131 @@ def test_confidence_diagnostics_fall_back_to_historical_total_without_a_timestam
         "window_count": 2,
         "historical_total_soc_span": 50.0,
     }
+
+
+def test_one_small_session_cannot_override_several_large_recent_charges(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A single small later session must not outweigh a weekend of large charges."""
+    for day in range(1, 4):
+        _record_window(
+            coordinator,
+            24,
+            15.6,
+            99,
+            64.35,
+            START + timedelta(days=day),
+        )
+    # A short drive right after the last big charge should not hijack the estimate.
+    _record_window(
+        coordinator,
+        90,
+        58.5,
+        70,
+        47.5,
+        START + timedelta(days=3, hours=1),
+    )
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.0
+
+
+def test_capacity_diagnostics_expose_how_many_windows_back_the_estimate(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Diagnostics distinguish total retained windows from those used now."""
+    old_sessions = [
+        {
+            "capacity_kwh": 61.83,
+            "delta_soc": 25.0,
+            "end_time": f"2026-01-0{day}T00:00:00+00:00",
+        }
+        for day in range(1, 4)
+    ]
+    recent_sessions = [
+        {
+            "capacity_kwh": 65.6,
+            "delta_soc": 30.0,
+            "end_time": f"2026-02-0{day}T00:00:00+00:00",
+        }
+        for day in range(1, 6)
+    ]
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": old_sessions + recent_sessions
+    }
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert diagnostics["accepted_window_count"] == 8
+    assert diagnostics["estimate_window_count"] == 5
+
+
+def test_exactly_five_sessions_are_all_used_in_the_estimate(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """With exactly the recency limit's worth of sessions, none are excluded."""
+    model = coordinator._battery_capacity_models.setdefault(VIN, {})
+    model["accepted_windows"] = [
+        {
+            "capacity_kwh": capacity,
+            "delta_soc": 20.0,
+            "end_time": f"2026-01-0{day}T00:00:00+00:00",
+        }
+        for day, capacity in zip(range(1, 6), [62.0, 64.0, 66.0, 68.0, 70.0])
+    ]
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+    assert diagnostics["accepted_window_count"] == 5
+    assert diagnostics["estimate_window_count"] == 5
+    # Equal weights: the weighted median of 5 equally-weighted values is the middle one.
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 66.0
+
+
+def test_a_sixth_older_session_is_excluded_from_the_estimate(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Adding one older session beyond the recency limit must not shift the estimate."""
+    model = coordinator._battery_capacity_models.setdefault(VIN, {})
+    model["accepted_windows"] = [
+        {
+            "capacity_kwh": capacity,
+            "delta_soc": 20.0,
+            "end_time": f"2026-01-0{day}T00:00:00+00:00",
+        }
+        for day, capacity in zip(range(1, 7), [40.0, 62.0, 64.0, 66.0, 68.0, 70.0])
+    ]
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+    assert diagnostics["accepted_window_count"] == 6
+    assert diagnostics["estimate_window_count"] == 5
+    # The oldest (40.0) is excluded; the result matches the 5-session case exactly.
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 66.0
+
+
+def test_outlier_gate_shares_the_same_recent_baseline_as_the_published_estimate(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A value close to the recent trend is accepted even against older evidence."""
+    # Two old, heavily-weighted sessions establish a stale low baseline.
+    _record_window(coordinator, 10, 5, 90, 45, START)
+    _record_window(coordinator, 10, 5, 90, 45, START + timedelta(days=1))
+    # Five smaller, more recent sessions establish the current real trend.
+    for day in range(2, 7):
+        _record_window(
+            coordinator, 50, 32.5, 70, 45.5, START + timedelta(days=day)
+        )
+
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.0
+
+    # 68 kWh deviates 36% from the stale full-history baseline (50) but only
+    # 4.6% from the current recent trend (65); it must be judged against the
+    # latter and accepted, matching what the published estimate already shows.
+    _record_window(coordinator, 50, 32.5, 70, 46.1, START + timedelta(days=7))
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+    assert diagnostics["rejected_window_count"] == 0
+    assert coordinator._battery_capacity_models[VIN]["accepted_windows"][0][
+        "capacity_kwh"
+    ] == 68.0
 
 
 def test_rejects_capacity_far_from_rolling_median(
