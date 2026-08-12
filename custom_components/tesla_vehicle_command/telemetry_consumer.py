@@ -493,6 +493,15 @@ class TelemetryConsumer:
                 temperature_c = (
                     sum(module_temps) / len(module_temps) if module_temps else None
                 )
+                is_dc_charging = (
+                    isinstance(last_signals.get("DCChargingPower"), (int, float))
+                    and last_signals["DCChargingPower"] > 0
+                )
+                energy_key = (
+                    "DCChargingEnergyIn" if is_dc_charging else "ACChargingEnergyIn"
+                )
+                charge_energy_added_kwh = self._to_float(last_signals.get(energy_key))
+                charge_type = "dc" if is_dc_charging else "ac"
                 charge_state.update(
                     self.coordinator.record_battery_capacity_sample(
                         vin,
@@ -501,6 +510,8 @@ class TelemetryConsumer:
                         observed_at=record_time,
                         source="live",
                         temperature_c=temperature_c,
+                        charge_energy_added_kwh=charge_energy_added_kwh,
+                        charge_type=charge_type,
                     )
                 )
         charge_state = response["charge_state"]

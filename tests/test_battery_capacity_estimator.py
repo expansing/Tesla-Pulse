@@ -1213,6 +1213,10 @@ def test_capacity_diagnostics_include_sources_ranges_and_rejections(
             "end_time": "2026-01-01T00:00:00+00:00",
             "source": "recorder",
             "rejection_reason": "deviates from rolling median",
+            "regression_r_squared": None,
+            "charge_energy_added_kwh": None,
+            "implied_charging_loss_pct": None,
+            "charge_type": None,
         }
     ]
 
@@ -1428,3 +1432,444 @@ def test_setup_validation_warns_when_telemetry_registration_is_required(
     assert coordinator.get_telemetry_setup_validation(VIN)["registration"] == (
         "registration_required"
     )
+
+
+# --- Regression (slope/intercept/R²/RMSE) diagnostics -----------------------
+#
+# These are an additional diagnostic layer collected from the same-frame
+# samples seen while a window is open. They never change capacity_kwh, which
+# remains the simple endpoint-based delta_energy/delta_soc*100 calculation.
+
+
+def test_linear_regression_returns_none_below_minimum_sample_count() -> None:
+    """A two-point window has nothing meaningful to fit a line against."""
+    assert (
+        TeslaVehicleCommandCoordinator._linear_regression(
+            [(50.0, 32.5), (80.0, 52.0)]
+        )
+        is None
+    )
+
+
+def test_linear_regression_returns_none_when_soc_has_no_spread() -> None:
+    """A degenerate (constant SOC) sample set cannot be fit against SOC."""
+    assert (
+        TeslaVehicleCommandCoordinator._linear_regression(
+            [(50.0, 10.0), (50.0, 12.0), (50.0, 11.0)]
+        )
+        is None
+    )
+
+
+def test_linear_regression_reports_a_perfect_fit_for_linear_data() -> None:
+    """Points falling exactly on a line report R²=1.0 and near-zero RMSE."""
+    points = [(50.0, 32.5), (60.0, 39.0), (70.0, 45.5), (80.0, 52.0)]
+
+    regression = TeslaVehicleCommandCoordinator._linear_regression(points)
+
+    assert regression is not None
+    slope, intercept, r_squared, rmse = regression
+    assert slope == pytest.approx(0.65)
+    assert intercept == pytest.approx(0.0, abs=1e-9)
+    assert r_squared == pytest.approx(1.0)
+    assert rmse == pytest.approx(0.0, abs=1e-9)
+
+
+def test_linear_regression_reports_a_poor_fit_for_non_linear_data() -> None:
+    """Points that bounce between endpoint values report a low R²."""
+    points = [(50.0, 32.5), (60.0, 52.0), (70.0, 32.5), (80.0, 52.0)]
+
+    regression = TeslaVehicleCommandCoordinator._linear_regression(points)
+
+    assert regression is not None
+    assert regression[2] == pytest.approx(0.2, abs=0.01)
+
+
+def test_live_charging_window_records_regression_diagnostics_from_intermediate_samples(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Intermediate same-frame samples produce regression stats on the window.
+
+    capacity_kwh itself is still computed only from the start/end endpoints.
+    """
+    coordinator.record_battery_charge_state(VIN, "Charging", observed_at=START)
+    coordinator.record_battery_capacity_sample(
+        VIN, 50, 32.5, observed_at=START, source="live"
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN, 60, 39.0, observed_at=START + timedelta(minutes=30), source="live"
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN, 70, 45.5, observed_at=START + timedelta(hours=1), source="live"
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN, 80, 52.0, observed_at=START + timedelta(hours=1, minutes=30), source="live"
+    )
+    coordinator.record_battery_charge_state(
+        VIN, "Stopped", observed_at=START + timedelta(hours=1, minutes=30)
+    )
+
+    window = coordinator._battery_capacity_models[VIN]["accepted_windows"][0]
+    assert window["capacity_kwh"] == 65.0
+    assert window["regression_sample_count"] == 4
+    assert window["regression_slope_kwh_per_soc"] == pytest.approx(0.65)
+    assert window["regression_r_squared"] == pytest.approx(1.0)
+
+
+def test_regression_fields_are_none_with_fewer_than_three_samples(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A two-point window has no fit; the R² gate does not apply to it."""
+    coordinator.record_battery_charge_state(VIN, "Charging", observed_at=START)
+    coordinator.record_battery_capacity_sample(
+        VIN, 50, 32.5, observed_at=START, source="live"
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN, 80, 52, observed_at=START + timedelta(hours=2), source="live"
+    )
+    coordinator.record_battery_charge_state(
+        VIN, "Stopped", observed_at=START + timedelta(hours=2)
+    )
+
+    window = coordinator._battery_capacity_models[VIN]["accepted_windows"][0]
+    assert window["regression_r_squared"] is None
+    assert window["regression_slope_kwh_per_soc"] is None
+    assert window["regression_sample_count"] == 2
+
+
+def test_poor_linear_fit_rejects_a_window_despite_plausible_endpoints(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A window whose intermediate samples don't track a line is rejected.
+
+    The endpoints alone would look like an ordinary 65 kWh session, but the
+    same-frame samples collected in between bounce between the two endpoint
+    values instead of tracking a line - evidence the session isn't
+    trustworthy even though its start/end values are individually plausible.
+    """
+    coordinator.record_battery_charge_state(VIN, "Charging", observed_at=START)
+    coordinator.record_battery_capacity_sample(
+        VIN, 50, 32.5, observed_at=START, source="live"
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN, 60, 52.0, observed_at=START + timedelta(minutes=20), source="live"
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN, 70, 32.5, observed_at=START + timedelta(minutes=40), source="live"
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN, 80, 52.0, observed_at=START + timedelta(hours=1), source="live"
+    )
+    coordinator.record_battery_charge_state(
+        VIN, "Stopped", observed_at=START + timedelta(hours=1)
+    )
+
+    model = coordinator._battery_capacity_models[VIN]
+    assert model.get("accepted_windows", []) == []
+    assert len(model["rejected_windows"]) == 1
+    rejected = model["rejected_windows"][0]
+    assert rejected["capacity_kwh"] == 65.0
+    assert rejected["regression_r_squared"] == pytest.approx(0.2, abs=0.01)
+    assert "poor linear fit" in rejected["rejection_reason"]
+
+
+# --- charge_energy_added (charger-side) cross-check --------------------------
+#
+# Compares the charger-metered energy added this session against the
+# BMS-measured delta_energy for the same window, for charging-direction
+# windows only. Also a diagnostic layer only; never feeds into capacity_kwh.
+
+
+def test_charge_energy_added_cross_check_computes_implied_loss_for_ac_charging(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """AC charger-metered energy vs BMS delta_energy yields an implied loss %."""
+    coordinator.record_battery_charge_state(VIN, "Charging", observed_at=START)
+    coordinator.record_battery_capacity_sample(
+        VIN,
+        50,
+        32.5,
+        observed_at=START,
+        source="live",
+        charge_energy_added_kwh=0.0,
+        charge_type="ac",
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN,
+        80,
+        52.0,
+        observed_at=START + timedelta(hours=2),
+        source="live",
+        charge_energy_added_kwh=21.0,
+        charge_type="ac",
+    )
+    coordinator.record_battery_charge_state(
+        VIN, "Stopped", observed_at=START + timedelta(hours=2)
+    )
+
+    window = coordinator._battery_capacity_models[VIN]["accepted_windows"][0]
+    assert window["charge_type"] == "ac"
+    assert window["charge_energy_added_kwh"] == 21.0
+    # BMS measured 19.5 kWh added against 21.0 kWh metered by the charger.
+    assert window["implied_charging_loss_pct"] == pytest.approx(7.14, abs=0.01)
+
+
+def test_charge_energy_added_cross_check_distinguishes_dc_charging(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """DC (Supercharging) sessions are tagged separately from AC sessions."""
+    coordinator.record_battery_charge_state(VIN, "Charging", observed_at=START)
+    coordinator.record_battery_capacity_sample(
+        VIN,
+        50,
+        32.5,
+        observed_at=START,
+        source="live",
+        charge_energy_added_kwh=0.0,
+        charge_type="dc",
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN,
+        80,
+        52.0,
+        observed_at=START + timedelta(hours=1),
+        source="live",
+        charge_energy_added_kwh=20.0,
+        charge_type="dc",
+    )
+    coordinator.record_battery_charge_state(
+        VIN, "Stopped", observed_at=START + timedelta(hours=1)
+    )
+
+    window = coordinator._battery_capacity_models[VIN]["accepted_windows"][0]
+    assert window["charge_type"] == "dc"
+    assert window["charge_energy_added_kwh"] == 20.0
+    assert window["implied_charging_loss_pct"] == pytest.approx(2.5, abs=0.01)
+
+
+def test_charge_energy_added_fields_are_none_for_discharging_windows(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """The charger cross-check only applies to charging-direction windows."""
+    coordinator.record_battery_charge_state(VIN, "Stopped", observed_at=START)
+    coordinator.record_battery_capacity_sample(
+        VIN, 80, 52, observed_at=START, source="live"
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN, 50, 32.5, observed_at=START + timedelta(hours=2), source="live"
+    )
+    coordinator.record_battery_charge_state(
+        VIN, "Charging", observed_at=START + timedelta(hours=2)
+    )
+
+    window = coordinator._battery_capacity_models[VIN]["accepted_windows"][0]
+    assert window["direction"] == "discharging"
+    assert window["charge_energy_added_kwh"] is None
+    assert window["implied_charging_loss_pct"] is None
+    assert window["charge_type"] is None
+
+
+def test_charge_energy_added_cross_check_skips_when_added_delta_is_not_positive(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A non-increasing charger-metered value (e.g. reset mid-session) is skipped."""
+    coordinator.record_battery_charge_state(VIN, "Charging", observed_at=START)
+    coordinator.record_battery_capacity_sample(
+        VIN,
+        50,
+        32.5,
+        observed_at=START,
+        source="live",
+        charge_energy_added_kwh=5.0,
+        charge_type="ac",
+    )
+    coordinator.record_battery_capacity_sample(
+        VIN,
+        80,
+        52.0,
+        observed_at=START + timedelta(hours=2),
+        source="live",
+        charge_energy_added_kwh=5.0,
+        charge_type="ac",
+    )
+    coordinator.record_battery_charge_state(
+        VIN, "Stopped", observed_at=START + timedelta(hours=2)
+    )
+
+    window = coordinator._battery_capacity_models[VIN]["accepted_windows"][0]
+    assert window["charge_energy_added_kwh"] is None
+    assert window["implied_charging_loss_pct"] is None
+    assert window["charge_type"] == "ac"
+
+
+def test_telemetry_frame_threads_dc_charge_energy_added_into_the_window(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """DCChargingPower/DCChargingEnergyIn signals flow through to the window."""
+    consumer = TelemetryConsumer(SimpleNamespace(), coordinator)
+    response = coordinator._empty_response()
+
+    async def process_frame(data: list[dict[str, object]], timestamp: str) -> None:
+        await consumer._process_vehicle_signals(
+            VIN, response, {"data": data, "createdAt": timestamp}
+        )
+
+    asyncio.run(
+        process_frame(
+            [
+                {
+                    "key": "DetailedChargeState",
+                    "value": {"stringValue": "DetailedChargeStateCharging"},
+                },
+                {"key": "Soc", "value": {"doubleValue": 50}},
+                {"key": "EnergyRemaining", "value": {"doubleValue": 32.5}},
+                {"key": "DCChargingPower", "value": {"doubleValue": 50}},
+                {"key": "DCChargingEnergyIn", "value": {"doubleValue": 0.0}},
+            ],
+            "2026-01-01T00:00:00Z",
+        )
+    )
+    asyncio.run(
+        process_frame(
+            [
+                {"key": "Soc", "value": {"doubleValue": 80}},
+                {"key": "EnergyRemaining", "value": {"doubleValue": 52}},
+                {"key": "DCChargingPower", "value": {"doubleValue": 50}},
+                {"key": "DCChargingEnergyIn", "value": {"doubleValue": 20.0}},
+            ],
+            "2026-01-01T01:00:00Z",
+        )
+    )
+    asyncio.run(
+        process_frame(
+            [
+                {
+                    "key": "DetailedChargeState",
+                    "value": {"stringValue": "DetailedChargeStateStopped"},
+                }
+            ],
+            "2026-01-01T01:01:00Z",
+        )
+    )
+
+    window = coordinator._battery_capacity_models[VIN]["accepted_windows"][0]
+    assert window["charge_type"] == "dc"
+    assert window["charge_energy_added_kwh"] == 20.0
+    assert window["implied_charging_loss_pct"] == pytest.approx(2.5, abs=0.01)
+
+
+def test_telemetry_frame_threads_ac_charge_energy_added_into_the_window(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """ACChargingEnergyIn is used when DCChargingPower is absent or zero."""
+    consumer = TelemetryConsumer(SimpleNamespace(), coordinator)
+    response = coordinator._empty_response()
+
+    async def process_frame(data: list[dict[str, object]], timestamp: str) -> None:
+        await consumer._process_vehicle_signals(
+            VIN, response, {"data": data, "createdAt": timestamp}
+        )
+
+    asyncio.run(
+        process_frame(
+            [
+                {
+                    "key": "DetailedChargeState",
+                    "value": {"stringValue": "DetailedChargeStateCharging"},
+                },
+                {"key": "Soc", "value": {"doubleValue": 50}},
+                {"key": "EnergyRemaining", "value": {"doubleValue": 32.5}},
+                {"key": "ACChargingEnergyIn", "value": {"doubleValue": 0.0}},
+            ],
+            "2026-01-01T00:00:00Z",
+        )
+    )
+    asyncio.run(
+        process_frame(
+            [
+                {"key": "Soc", "value": {"doubleValue": 80}},
+                {"key": "EnergyRemaining", "value": {"doubleValue": 52}},
+                {"key": "ACChargingEnergyIn", "value": {"doubleValue": 21.0}},
+            ],
+            "2026-01-01T02:00:00Z",
+        )
+    )
+    asyncio.run(
+        process_frame(
+            [
+                {
+                    "key": "DetailedChargeState",
+                    "value": {"stringValue": "DetailedChargeStateStopped"},
+                }
+            ],
+            "2026-01-01T02:01:00Z",
+        )
+    )
+
+    window = coordinator._battery_capacity_models[VIN]["accepted_windows"][0]
+    assert window["charge_type"] == "ac"
+    assert window["charge_energy_added_kwh"] == 21.0
+    assert window["implied_charging_loss_pct"] == pytest.approx(7.14, abs=0.01)
+
+
+def test_r_squared_gate_accepts_a_window_exactly_at_the_threshold(
+    coordinator: TeslaVehicleCommandCoordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A regression fit exactly at the minimum R² threshold is still accepted.
+
+    The gate rejects only when R² is strictly below the threshold, so a fit
+    landing exactly on it should pass like any other acceptable window.
+    """
+    monkeypatch.setattr(
+        TeslaVehicleCommandCoordinator,
+        "_linear_regression",
+        staticmethod(lambda points: (0.65, 0.0, 0.95, 0.01)),
+    )
+    active = {
+        "start": {"soc": 50.0, "energy": 32.5, "timestamp": START.isoformat()},
+        "last": {
+            "soc": 80.0,
+            "energy": 52.0,
+            "timestamp": (START + timedelta(hours=1)).isoformat(),
+        },
+        "direction": "charging",
+        "source": "live",
+        "samples": [(50.0, 32.5), (60.0, 39.0), (70.0, 45.5), (80.0, 52.0)],
+    }
+
+    coordinator._finalize_or_discard_window(VIN, active)
+
+    model = coordinator._battery_capacity_models[VIN]
+    assert len(model.get("accepted_windows", [])) == 1
+    assert model["accepted_windows"][0]["regression_r_squared"] == 0.95
+
+
+def test_r_squared_gate_rejects_a_window_just_below_the_threshold(
+    coordinator: TeslaVehicleCommandCoordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A regression fit just below the minimum R² threshold is rejected."""
+    monkeypatch.setattr(
+        TeslaVehicleCommandCoordinator,
+        "_linear_regression",
+        staticmethod(lambda points: (0.65, 0.0, 0.9499, 0.01)),
+    )
+    active = {
+        "start": {"soc": 50.0, "energy": 32.5, "timestamp": START.isoformat()},
+        "last": {
+            "soc": 80.0,
+            "energy": 52.0,
+            "timestamp": (START + timedelta(hours=1)).isoformat(),
+        },
+        "direction": "charging",
+        "source": "live",
+        "samples": [(50.0, 32.5), (60.0, 39.0), (70.0, 45.5), (80.0, 52.0)],
+    }
+
+    coordinator._finalize_or_discard_window(VIN, active)
+
+    model = coordinator._battery_capacity_models[VIN]
+    assert model.get("accepted_windows", []) == []
+    assert len(model["rejected_windows"]) == 1
+    assert "poor linear fit" in model["rejected_windows"][0]["rejection_reason"]

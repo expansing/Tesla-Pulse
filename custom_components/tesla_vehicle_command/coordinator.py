@@ -284,6 +284,9 @@ _BATTERY_CAPACITY_MIN_KWH = 10.0
 _BATTERY_CAPACITY_MAX_KWH = 200.0
 _BATTERY_CAPACITY_MAX_ESTIMATES = 12
 _BATTERY_CAPACITY_RECENT_WINDOW_COUNT = 5
+_BATTERY_WINDOW_MAX_REGRESSION_SAMPLES = 500
+_BATTERY_WINDOW_MIN_REGRESSION_SAMPLES = 3
+_BATTERY_WINDOW_MIN_R_SQUARED = 0.95
 _BATTERY_CAPACITY_SOC_EPSILON = 0.05
 _BATTERY_CAPACITY_REVERSAL_TOLERANCE_PCT = 1.0
 _BATTERY_CAPACITY_REVERSAL_STREAK_LIMIT = 2
@@ -975,6 +978,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         observed_at: datetime | None = None,
         source: str = "live",
         temperature_c: Any = None,
+        charge_energy_added_kwh: Any = None,
+        charge_type: str | None = None,
     ) -> dict[str, Any]:
         """Feed one same-record SOC/energy pair into the window state machine."""
         if (
@@ -998,6 +1003,12 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "energy": float(energy_remaining_kwh),
             "timestamp": now.isoformat(),
             "temperature": temperature,
+            "charge_energy_added": (
+                float(charge_energy_added_kwh)
+                if self._is_finite_number(charge_energy_added_kwh)
+                else None
+            ),
+            "charge_type": charge_type if charge_type in ("ac", "dc") else None,
         }
         normalized_source = "recorder" if source == "recorder" else "live"
 
@@ -1014,8 +1025,16 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # (e.g. recovering after a transition whose anchor was too stale).
             model["latest_live_sample"] = sample
             mode = model.get("charging_state_mode")
-            if mode is not None and not isinstance(model.get("live_window"), dict):
+            live_window = model.get("live_window")
+            if mode is not None and not isinstance(live_window, dict):
                 model["live_window"] = self._new_live_window(sample, mode)
+            elif isinstance(live_window, dict):
+                # Only collected for the regression diagnostic; the window's
+                # own start/end boundary is set solely at charge-state
+                # transitions (see record_battery_charge_state).
+                samples = live_window.setdefault("samples", [])
+                if len(samples) < _BATTERY_WINDOW_MAX_REGRESSION_SAMPLES:
+                    samples.append((sample["soc"], sample["energy"]))
             return self._battery_capacity_metrics(vin)
 
         active = model.get("active_window")
@@ -1085,6 +1104,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "source": source,
             "temp_sum": float(temperature) if temperature is not None else 0.0,
             "temp_count": 1 if temperature is not None else 0,
+            "samples": [(sample["soc"], sample["energy"])],
         }
 
     @staticmethod
@@ -1097,6 +1117,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if temperature is not None:
             active["temp_sum"] = float(active.get("temp_sum", 0.0)) + float(temperature)
             active["temp_count"] = int(active.get("temp_count", 0)) + 1
+        samples = active.setdefault("samples", [])
+        if len(samples) < _BATTERY_WINDOW_MAX_REGRESSION_SAMPLES:
+            samples.append((sample["soc"], sample["energy"]))
 
     @staticmethod
     def _new_live_window(sample: dict[str, Any], mode: str) -> dict[str, Any]:
@@ -1104,7 +1127,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Unlike a recorder window, a live window is never extended sample by
         sample: its "last" value is only ever overwritten once, by the fresh
-        sample that closes it at the next charge-state transition.
+        sample that closes it at the next charge-state transition. Same-frame
+        live samples seen in between are still collected in "samples" purely
+        as a regression diagnostic (see _linear_regression); they never move
+        the window's own start/end boundary.
         """
         temperature = sample.get("temperature")
         return {
@@ -1114,6 +1140,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "source": "live",
             "temp_sum": float(temperature) if temperature is not None else 0.0,
             "temp_count": 1 if temperature is not None else 0,
+            "samples": [(sample["soc"], sample["energy"])],
         }
 
     @staticmethod
@@ -1265,6 +1292,52 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if temp_count > 0
             else None
         )
+
+        # Regression diagnostics: a linear fit over every same-frame SOC/energy
+        # pair observed while the window was open. This never feeds back into
+        # capacity_kwh above (still a pure endpoint delta); it is only an
+        # independent quality signal, and gates acceptance when it is poor.
+        samples = active.get("samples")
+        regression = (
+            self._linear_regression(samples) if isinstance(samples, list) else None
+        )
+        if regression is not None:
+            slope, intercept, r_squared, rmse = regression
+            regression_fields = {
+                "regression_slope_kwh_per_soc": round(slope, 4),
+                "regression_intercept_kwh": round(intercept, 3),
+                "regression_r_squared": round(r_squared, 4),
+                "regression_rmse_kwh": round(rmse, 4),
+                "regression_sample_count": len(samples),
+            }
+        else:
+            regression_fields = {
+                "regression_slope_kwh_per_soc": None,
+                "regression_intercept_kwh": None,
+                "regression_r_squared": None,
+                "regression_rmse_kwh": None,
+                "regression_sample_count": len(samples) if isinstance(samples, list) else 0,
+            }
+
+        # Charger-side cross-check: compares the charger-metered energy added
+        # this session (ACChargingEnergyIn/DCChargingEnergyIn) against the
+        # BMS-side delta_energy for the same window. Charging-direction
+        # windows only; also purely diagnostic, never used in capacity_kwh.
+        charge_energy_added_kwh = None
+        implied_charging_loss_pct = None
+        charge_type = None
+        if direction == "charging":
+            start_added = start.get("charge_energy_added")
+            end_added = last.get("charge_energy_added")
+            if self._is_finite_number(start_added) and self._is_finite_number(end_added):
+                added_delta = float(end_added) - float(start_added)
+                if added_delta > 0:
+                    charge_energy_added_kwh = round(added_delta, 3)
+                    implied_charging_loss_pct = round(
+                        (added_delta - delta_energy) / added_delta * 100, 2
+                    )
+            charge_type = last.get("charge_type") or start.get("charge_type")
+
         window = {
             "start_soc": round(start_soc, 3),
             "end_soc": round(end_soc, 3),
@@ -1278,14 +1351,27 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "direction": direction,
             "source": source,
             "temperature_c": temperature_c,
+            "charge_energy_added_kwh": charge_energy_added_kwh,
+            "implied_charging_loss_pct": implied_charging_loss_pct,
+            "charge_type": charge_type,
             "rejected": False,
             "rejection_reason": None,
+            **regression_fields,
         }
 
         model = self._battery_capacity_models.setdefault(vin, {})
         if not _BATTERY_CAPACITY_MIN_KWH <= capacity_kwh <= _BATTERY_CAPACITY_MAX_KWH:
             self._store_rejected_window(
                 model, window, f"implausible capacity {capacity_kwh:.1f} kWh"
+            )
+            return
+
+        if (
+            regression is not None
+            and regression[2] < _BATTERY_WINDOW_MIN_R_SQUARED
+        ):
+            self._store_rejected_window(
+                model, window, f"poor linear fit (R\u00b2={regression[2]:.3f})"
             )
             return
 
@@ -1412,6 +1498,34 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for window in windows
         )
         return weighted_sum / total_weight
+
+    @staticmethod
+    def _linear_regression(
+        points: list[tuple[float, float]],
+    ) -> tuple[float, float, float, float] | None:
+        """Fit energy = intercept + slope * soc via ordinary least squares.
+
+        Returns (slope, intercept, r_squared, rmse), or None when there are
+        too few points or the SOC values have no spread to fit against. This
+        is a diagnostic layer only: it never feeds into capacity_kwh, which
+        remains the simple endpoint-based delta calculation.
+        """
+        n = len(points)
+        if n < _BATTERY_WINDOW_MIN_REGRESSION_SAMPLES:
+            return None
+        mean_x = sum(x for x, _ in points) / n
+        mean_y = sum(y for _, y in points) / n
+        ss_xx = sum((x - mean_x) ** 2 for x, _ in points)
+        if ss_xx <= 0:
+            return None
+        ss_xy = sum((x - mean_x) * (y - mean_y) for x, y in points)
+        slope = ss_xy / ss_xx
+        intercept = mean_y - slope * mean_x
+        ss_res = sum((y - (intercept + slope * x)) ** 2 for x, y in points)
+        ss_tot = sum((y - mean_y) ** 2 for _, y in points)
+        r_squared = 1.0 if ss_tot <= 0 else 1.0 - ss_res / ss_tot
+        rmse = math.sqrt(ss_res / n)
+        return slope, intercept, r_squared, rmse
 
     @staticmethod
     def _median_absolute_deviation(
@@ -1563,6 +1677,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "end_time": window.get("end_time"),
                         "source": window.get("source", "unknown"),
                         "rejection_reason": window.get("rejection_reason"),
+                        "regression_r_squared": window.get("regression_r_squared"),
+                        "charge_energy_added_kwh": window.get("charge_energy_added_kwh"),
+                        "implied_charging_loss_pct": window.get("implied_charging_loss_pct"),
+                        "charge_type": window.get("charge_type"),
                     }
                     for window in rejected_windows
                 ],
@@ -1637,6 +1755,13 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "direction": window.get("direction"),
                 "source": window.get("source", "unknown"),
                 "temperature_c": window.get("temperature_c"),
+                "regression_slope_kwh_per_soc": window.get("regression_slope_kwh_per_soc"),
+                "regression_r_squared": window.get("regression_r_squared"),
+                "regression_rmse_kwh": window.get("regression_rmse_kwh"),
+                "regression_sample_count": window.get("regression_sample_count"),
+                "charge_energy_added_kwh": window.get("charge_energy_added_kwh"),
+                "implied_charging_loss_pct": window.get("implied_charging_loss_pct"),
+                "charge_type": window.get("charge_type"),
             }
             for window in windows
         ]
@@ -1676,6 +1801,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "end_time": window.get("end_time"),
                     "source": window.get("source", "unknown"),
                     "rejection_reason": window.get("rejection_reason"),
+                    "regression_r_squared": window.get("regression_r_squared"),
+                    "charge_energy_added_kwh": window.get("charge_energy_added_kwh"),
+                    "implied_charging_loss_pct": window.get("implied_charging_loss_pct"),
+                    "charge_type": window.get("charge_type"),
                 }
                 for window in rejected_windows
             ],
