@@ -1441,6 +1441,58 @@ def test_capacity_diagnostics_include_bounded_snapshot_trend(
     assert diagnostics["daily_snapshot_trend_stable"] is False
 
 
+def test_implied_soc_zero_reserve_returns_the_median_gap_from_proportional(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A consistent gap between observed energy and a pure-proportional model is measured.
+
+    If EnergyRemaining were exactly proportional to SOC, each observation's
+    energy would equal slope/100 * soc exactly; a positive median gap is
+    evidence of a reserve that persists even at indicated 0% SOC.
+    """
+    observations = [
+        {"soc": 50.0, "energy": 32.0},
+        {"soc": 90.0, "energy": 57.4},
+    ]
+
+    result = coordinator._implied_soc_zero_reserve_kwh(observations, 60.0)
+
+    assert result == pytest.approx(2.7)
+
+
+def test_implied_soc_zero_reserve_returns_none_without_observations(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """No high-SOC evidence yet means no implied-reserve estimate."""
+    assert coordinator._implied_soc_zero_reserve_kwh([], 60.0) is None
+
+
+def test_capacity_diagnostics_expose_implied_soc_zero_reserve(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """The published estimate and high-SOC observations combine into a reserve estimate."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"capacity_kwh": 60.0, "delta_soc": 20.0, "source": "live"}],
+        "high_soc_observations": [
+            {"soc": 50.0, "energy": 32.0, "capacity_kwh": 64.0},
+            {"soc": 90.0, "energy": 57.4, "capacity_kwh": 63.8},
+        ],
+    }
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert diagnostics["implied_soc_zero_reserve_kwh"] == pytest.approx(2.7)
+
+
+def test_capacity_diagnostics_implied_soc_zero_reserve_is_none_without_evidence(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """No accepted windows means no published estimate to compare against."""
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert diagnostics["implied_soc_zero_reserve_kwh"] is None
+
+
 def _snapshots_with_symmetric_noise(center: float, spread: float) -> list[dict[str, Any]]:
     """Return 7 daily snapshots whose median absolute deviation equals spread."""
     values = [

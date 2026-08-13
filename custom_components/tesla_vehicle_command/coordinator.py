@@ -1529,6 +1529,34 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return slope, intercept, r_squared, rmse
 
     @staticmethod
+    def _implied_soc_zero_reserve_kwh(
+        observations: list[dict[str, Any]], slope_kwh: float
+    ) -> float | None:
+        """Return the median energy a proportional model misses at 0% SOC.
+
+        If EnergyRemaining were exactly proportional to SOC, each high-SOC
+        observation's energy should equal slope_kwh/100 * soc. A consistent
+        positive gap across observations is evidence of a reserve that
+        persists even at indicated 0% SOC. This is a read-only cross-check
+        against already-collected data; it never feeds back into
+        capacity_kwh or the published estimate.
+        """
+        valid = [
+            observation
+            for observation in observations
+            if isinstance(observation, dict)
+            and TeslaVehicleCommandCoordinator._is_finite_number(observation.get("soc"))
+            and TeslaVehicleCommandCoordinator._is_finite_number(observation.get("energy"))
+        ]
+        if not valid:
+            return None
+        implied = [
+            float(observation["energy"]) - slope_kwh / 100 * float(observation["soc"])
+            for observation in valid
+        ]
+        return float(median(implied))
+
+    @staticmethod
     def _median_absolute_deviation(
         values: list[float], center: float
     ) -> float:
@@ -1669,6 +1697,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "accepted_window_count": 0,
                 "accepted_windows": [],
                 "accepted_window_sources": accepted_source_counts,
+                "implied_soc_zero_reserve_kwh": None,
                 "history_import_attempted_at": model.get("history_import_attempted_at"),
                 "history_import_completed_at": model.get("history_import_completed_at"),
                 "history_import_last_pair_count": model.get("history_import_last_pair_count"),
@@ -1704,6 +1733,11 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         high_soc_deviation = (
             abs(high_soc_median - estimate) / estimate * 100
             if high_soc_median is not None and estimate not in (None, 0)
+            else None
+        )
+        implied_soc_zero_reserve_kwh = (
+            self._implied_soc_zero_reserve_kwh(observations, float(estimate))
+            if isinstance(observations, list) and estimate is not None
             else None
         )
         snapshots = model.get("daily_snapshots")
@@ -1787,6 +1821,11 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "high_soc_discrepancy_warning": bool(
                 high_soc_deviation is not None
                 and high_soc_deviation > _BATTERY_HIGH_SOC_WARNING_DEVIATION_PCT
+            ),
+            "implied_soc_zero_reserve_kwh": (
+                round(implied_soc_zero_reserve_kwh, 3)
+                if implied_soc_zero_reserve_kwh is not None
+                else None
             ),
             "daily_snapshots_30d": recent_snapshots,
             "daily_snapshot_change_30d_kwh": trend_change_kwh,
