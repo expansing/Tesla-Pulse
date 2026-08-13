@@ -1493,6 +1493,87 @@ def test_capacity_diagnostics_implied_soc_zero_reserve_is_none_without_evidence(
     assert diagnostics["implied_soc_zero_reserve_kwh"] is None
 
 
+def _windows_with_intercepts(intercepts: list[float]) -> list[dict[str, Any]]:
+    """Return minimal valid accepted windows, each carrying a regression intercept."""
+    return [
+        {
+            "capacity_kwh": 62.0,
+            "delta_soc": 20.0,
+            "regression_intercept_kwh": intercept,
+        }
+        for intercept in intercepts
+    ]
+
+
+def test_regression_intercept_stability_requires_the_minimum_sample_count(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Fewer than 10 windows with a fitted intercept is not enough to call it stable.
+
+    Guards against declaring the SOC=0% reserve hypothesis confirmed from a
+    handful of sessions, per the recommendation to validate over 10-20
+    completed windows before treating the intercept as a genuine offset.
+    """
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": _windows_with_intercepts([3.0] * 9),
+    }
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert diagnostics["regression_intercept_sample_count"] == 9
+    assert diagnostics["regression_intercept_median_kwh"] == 3.0
+    assert diagnostics["regression_intercept_mad_kwh"] == 0.0
+    assert diagnostics["regression_intercept_stable"] is False
+
+
+def test_regression_intercept_stability_is_true_for_a_tight_cluster(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A tight cluster of >=10 fitted intercepts is reported as stable."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": _windows_with_intercepts(
+            [2.6, 2.8, 2.9, 3.0, 3.0, 3.1, 3.2, 3.3, 3.3, 3.4]
+        ),
+    }
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert diagnostics["regression_intercept_sample_count"] == 10
+    assert diagnostics["regression_intercept_stable"] is True
+
+
+def test_regression_intercept_stability_is_false_for_scattered_values(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A wide spread across >=10 fitted intercepts is not reported as stable."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": _windows_with_intercepts(
+            [-4.0, -2.0, 0.0, 1.0, 3.0, 5.0, 6.0, 8.0, 9.0, 10.0]
+        ),
+    }
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert diagnostics["regression_intercept_sample_count"] == 10
+    assert diagnostics["regression_intercept_stable"] is False
+
+
+def test_regression_intercept_diagnostics_default_when_no_windows_have_a_fit(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Windows without a computed regression fit contribute nothing to the check."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"capacity_kwh": 62.0, "delta_soc": 20.0}],
+    }
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert diagnostics["regression_intercept_sample_count"] == 0
+    assert diagnostics["regression_intercept_median_kwh"] is None
+    assert diagnostics["regression_intercept_mad_kwh"] is None
+    assert diagnostics["regression_intercept_stable"] is False
+
+
 def _snapshots_with_symmetric_noise(center: float, spread: float) -> list[dict[str, Any]]:
     """Return 7 daily snapshots whose median absolute deviation equals spread."""
     values = [

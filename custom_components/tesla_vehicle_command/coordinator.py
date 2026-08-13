@@ -299,6 +299,8 @@ _BATTERY_HIGH_SOC_MAX_OBSERVATIONS = 12
 _BATTERY_HIGH_SOC_WARNING_DEVIATION_PCT = 10.0
 _BATTERY_SNAPSHOT_MAX_DAYS = 400
 _BATTERY_TREND_STABILITY_MAD_PCT = 1.5
+_BATTERY_INTERCEPT_STABILITY_MIN_COUNT = 10
+_BATTERY_INTERCEPT_STABILITY_MAX_MAD_KWH = 1.0
 _TELEMETRY_DIAGNOSTIC_COUNTER_MAX = 10_000
 _BATTERY_HISTORY_LOOKBACK = timedelta(days=30)
 _BATTERY_HISTORY_PAIR_TOLERANCE = timedelta(seconds=2)
@@ -1698,6 +1700,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "accepted_windows": [],
                 "accepted_window_sources": accepted_source_counts,
                 "implied_soc_zero_reserve_kwh": None,
+                "regression_intercept_sample_count": 0,
+                "regression_intercept_median_kwh": None,
+                "regression_intercept_mad_kwh": None,
+                "regression_intercept_stable": False,
                 "history_import_attempted_at": model.get("history_import_attempted_at"),
                 "history_import_completed_at": model.get("history_import_completed_at"),
                 "history_import_last_pair_count": model.get("history_import_last_pair_count"),
@@ -1739,6 +1745,22 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._implied_soc_zero_reserve_kwh(observations, float(estimate))
             if isinstance(observations, list) and estimate is not None
             else None
+        )
+        intercepts = [
+            float(window["regression_intercept_kwh"])
+            for window in windows
+            if self._is_finite_number(window.get("regression_intercept_kwh"))
+        ]
+        intercept_median = median(intercepts) if intercepts else None
+        intercept_mad = (
+            self._median_absolute_deviation(intercepts, float(intercept_median))
+            if intercept_median is not None
+            else None
+        )
+        intercept_stable = bool(
+            len(intercepts) >= _BATTERY_INTERCEPT_STABILITY_MIN_COUNT
+            and intercept_mad is not None
+            and intercept_mad <= _BATTERY_INTERCEPT_STABILITY_MAX_MAD_KWH
         )
         snapshots = model.get("daily_snapshots")
         recent_snapshots = [
@@ -1827,6 +1849,14 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if implied_soc_zero_reserve_kwh is not None
                 else None
             ),
+            "regression_intercept_sample_count": len(intercepts),
+            "regression_intercept_median_kwh": (
+                round(intercept_median, 3) if intercept_median is not None else None
+            ),
+            "regression_intercept_mad_kwh": (
+                round(intercept_mad, 3) if intercept_mad is not None else None
+            ),
+            "regression_intercept_stable": intercept_stable,
             "daily_snapshots_30d": recent_snapshots,
             "daily_snapshot_change_30d_kwh": trend_change_kwh,
             "daily_snapshot_trend_stable": trend_stable,
