@@ -2050,8 +2050,13 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._battery_capacity_models[vin] = current_model
                 continue
 
-            active_window = current_model.get("active_window")
-            current_model["active_window"] = None
+            # A session in progress at the end of this batch is left open
+            # rather than force-closed, so a later restart's next batch can
+            # continue it; the existing reversal/gap logic in
+            # record_battery_capacity_sample closes it naturally once a real
+            # reversal or a 6-hour gap occurs. Force-closing it here would
+            # fragment one continuous session into multiple sub-20%-span
+            # pieces whenever an import happens to land mid-session.
             for observed_at, soc_percent, energy_remaining_kwh in pairs:
                 self.record_battery_capacity_sample(
                     vin,
@@ -2060,9 +2065,6 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     observed_at,
                     source="recorder",
                 )
-            self.flush_active_battery_window(vin)
-            if isinstance(active_window, dict):
-                current_model["active_window"] = active_window
             metrics = self._battery_capacity_metrics(vin)
             imported_model = self._battery_capacity_models.setdefault(vin, {})
             imported_model["history_import_attempted_at"] = end_time.isoformat()

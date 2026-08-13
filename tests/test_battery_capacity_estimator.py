@@ -973,6 +973,46 @@ def test_recorder_long_gap_closes_the_previous_window(
     assert coordinator._battery_capacity_models[VIN]["active_window"]["start"]["soc"] == 76.0
 
 
+def test_recorder_import_batches_do_not_fragment_an_in_progress_session(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Samples fed in separate batches still combine into one session.
+
+    Regression test for a real bug: async_import_battery_history used to
+    reset and force-close the recorder active_window on every call, so a
+    session split across two restarts by a batch boundary landing
+    mid-session was fragmented into pieces each below the 20-point minimum
+    and silently lost forever. Recorder samples spanning >=20 SOC points
+    must still combine into one window even when recorded in two groups
+    with nothing closing the window in between.
+    """
+    # First "import run" covers only part of the session.
+    for step in range(12):
+        coordinator.record_battery_capacity_sample(
+            VIN,
+            50 + step,
+            32.5 + step * 0.65,
+            observed_at=START + timedelta(minutes=step),
+            source="recorder",
+        )
+    assert coordinator._battery_capacity_models[VIN].get("accepted_windows", []) == []
+
+    # A later "import run" continues the same still-open session.
+    for step in range(12, 21):
+        coordinator.record_battery_capacity_sample(
+            VIN,
+            50 + step,
+            32.5 + step * 0.65,
+            observed_at=START + timedelta(minutes=step),
+            source="recorder",
+        )
+    coordinator.flush_active_battery_window(VIN)
+
+    model = coordinator._battery_capacity_models[VIN]
+    assert len(model["accepted_windows"]) == 1
+    assert model["accepted_windows"][0]["delta_soc"] == 20.0
+
+
 def test_migrates_legacy_estimates_to_accepted_windows(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
