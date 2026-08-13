@@ -14,6 +14,7 @@ from typing import Any, Callable
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -2644,7 +2645,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         vin, telemetry_generation, telemetry_event
                     )
                 except TimeoutError as err:
-                    raise RuntimeError(
+                    raise HomeAssistantError(
                         f"Vehicle {vin} did not become ready within "
                         f"{WAKE_TELEMETRY_TIMEOUT_SECONDS} seconds after wake-up"
                     ) from err

@@ -32,6 +32,10 @@ class _Store(Generic[T]):
         pass
 
 
+class HomeAssistantError(Exception):
+    """Stand-in for Home Assistant's user-facing error base class."""
+
+
 class _Platform:
     """Names used by the integration's platform constants."""
 
@@ -58,6 +62,7 @@ def _install_home_assistant_stubs() -> None:
     _module("homeassistant.config_entries", ConfigEntry=object)
     _module("homeassistant.const", Platform=_Platform)
     _module("homeassistant.core", HomeAssistant=object)
+    _module("homeassistant.exceptions", HomeAssistantError=HomeAssistantError)
     helpers = _module("homeassistant.helpers")
     _module("homeassistant.helpers.aiohttp_client", async_get_clientsession=lambda hass: None)
     _module("homeassistant.helpers.storage", Store=_Store)
