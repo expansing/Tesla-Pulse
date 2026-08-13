@@ -1671,6 +1671,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "history_import_attempted_at": model.get("history_import_attempted_at"),
                 "history_import_completed_at": model.get("history_import_completed_at"),
                 "history_import_last_pair_count": model.get("history_import_last_pair_count"),
+                "history_import_last_failure_at": model.get("history_import_last_failure_at"),
                 "rejected_window_count": rejected_count,
                 "rejected_window_sources": rejected_source_counts,
                 "rejected_windows": [
@@ -1798,6 +1799,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "history_import_attempted_at": model.get("history_import_attempted_at"),
             "history_import_completed_at": model.get("history_import_completed_at"),
             "history_import_last_pair_count": model.get("history_import_last_pair_count"),
+            "history_import_last_failure_at": model.get("history_import_last_failure_at"),
             "rejected_window_count": rejected_count,
             "rejected_window_sources": rejected_source_counts,
             "rejected_windows": [
@@ -1936,6 +1938,26 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         migrated["model_version"] = _BATTERY_CAPACITY_MODEL_VERSION
         return migrated
 
+    @staticmethod
+    def _history_import_is_throttled(model: dict[str, Any], now: datetime) -> bool:
+        """Return whether a Recorder history-import attempt should be skipped.
+
+        Only a recent failure throttles retries; a successful run (with or
+        without new pairs) never blocks the next restart's incremental
+        catch-up, since that query is already bounded to whatever is new
+        since the last completed import.
+        """
+        last_failure = model.get("history_import_last_failure_at")
+        if not isinstance(last_failure, str):
+            return False
+        try:
+            last_failure_at = datetime.fromisoformat(last_failure)
+        except ValueError:
+            return False
+        if last_failure_at.tzinfo is None:
+            return False
+        return now - last_failure_at < _BATTERY_HISTORY_RETRY_INTERVAL
+
     async def async_import_battery_history(self) -> None:
         """Seed capacity estimates from tightly paired Recorder history states."""
         if "recorder" not in self.hass.config.components:
@@ -1952,19 +1974,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for vehicle in self._vehicles:
             vin = vehicle["vin"]
             model = self._battery_capacity_models.get(vin, {})
-            last_attempt = model.get("history_import_attempted_at")
-            if isinstance(last_attempt, str):
-                try:
-                    last_attempt_at = datetime.fromisoformat(last_attempt)
-                except ValueError:
-                    pass
-                else:
-                    if (
-                        last_attempt_at.tzinfo is not None
-                        and end_time - last_attempt_at
-                        < _BATTERY_HISTORY_RETRY_INTERVAL
-                    ):
-                        continue
+            if self._history_import_is_throttled(model, end_time):
+                continue
 
             soc_entity_id = entity_registry.async_get_entity_id(
                 "sensor", DOMAIN, f"{vin}_battery_level"
@@ -2017,6 +2028,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 failed_model["history_import_attempted_at"] = (
                     end_time.isoformat()
                 )
+                failed_model["history_import_last_failure_at"] = (
+                    end_time.isoformat()
+                )
                 attempted = True
                 continue
 
@@ -2024,6 +2038,12 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             current_model = self._battery_capacity_models.setdefault(vin, {})
             if not pairs:
                 current_model["history_import_attempted_at"] = (
+                    end_time.isoformat()
+                )
+                # Nothing new in this range; still a successful, completed
+                # check, so the watermark advances and next restart is not
+                # throttled the way a genuine failure would be.
+                current_model["history_import_completed_at"] = (
                     end_time.isoformat()
                 )
                 current_model["history_import_last_pair_count"] = 0

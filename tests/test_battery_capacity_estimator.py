@@ -1256,6 +1256,56 @@ def test_capacity_diagnostics_history_import_fields_default_to_none(
     assert diagnostics["history_import_last_pair_count"] is None
 
 
+def test_history_import_throttle_never_blocks_after_a_successful_run(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A successful import (even with zero new pairs) is retried every restart.
+
+    Regression test for a real bug: throttling on history_import_attempted_at
+    silently blocked the incremental catch-up import for a full day after any
+    restart, including successful ones, so new charge/discharge sessions were
+    never re-scanned until the next restart at least 24h later.
+    """
+    now = START + timedelta(hours=1)
+    model = {
+        "history_import_attempted_at": START.isoformat(),
+        "history_import_completed_at": START.isoformat(),
+        "history_import_last_pair_count": 0,
+    }
+
+    assert coordinator._history_import_is_throttled(model, now) is False
+
+
+def test_history_import_throttle_blocks_retries_after_a_recent_failure(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A genuine failure still throttles retries within the retry interval."""
+    now = START + timedelta(hours=1)
+    model = {
+        "history_import_attempted_at": START.isoformat(),
+        "history_import_last_failure_at": START.isoformat(),
+    }
+
+    assert coordinator._history_import_is_throttled(model, now) is True
+
+
+def test_history_import_throttle_expires_after_the_retry_interval(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A failure older than the retry interval no longer blocks a retry."""
+    now = START + timedelta(days=2)
+    model = {"history_import_last_failure_at": START.isoformat()}
+
+    assert coordinator._history_import_is_throttled(model, now) is False
+
+
+def test_history_import_throttle_ignores_a_never_attempted_model(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A vehicle with no import history yet is never throttled."""
+    assert coordinator._history_import_is_throttled({}, START) is False
+
+
 def test_telemetry_status_reports_specific_health_reasons(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
