@@ -1221,6 +1221,41 @@ def test_capacity_diagnostics_include_sources_ranges_and_rejections(
     ]
 
 
+def test_capacity_diagnostics_expose_history_import_bookkeeping(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """History-import timestamps and pair count are surfaced for troubleshooting.
+
+    Without these, there is no way to tell whether the Recorder catch-up
+    import ran recently, found nothing, or hasn't run since a given restart.
+    """
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"source": "recorder", "capacity_kwh": 65.0, "delta_soc": 20.0}],
+        "history_import_attempted_at": "2026-08-13T04:00:00+00:00",
+        "history_import_completed_at": "2026-08-13T04:00:00+00:00",
+        "history_import_last_pair_count": 7,
+    }
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert diagnostics["history_import_attempted_at"] == "2026-08-13T04:00:00+00:00"
+    assert diagnostics["history_import_completed_at"] == "2026-08-13T04:00:00+00:00"
+    assert diagnostics["history_import_last_pair_count"] == 7
+
+
+def test_capacity_diagnostics_history_import_fields_default_to_none(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A vehicle with no import attempt yet reports None rather than an error."""
+    coordinator._battery_capacity_models[VIN] = {}
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert diagnostics["history_import_attempted_at"] is None
+    assert diagnostics["history_import_completed_at"] is None
+    assert diagnostics["history_import_last_pair_count"] is None
+
+
 def test_telemetry_status_reports_specific_health_reasons(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:

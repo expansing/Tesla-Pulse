@@ -1668,6 +1668,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "accepted_window_count": 0,
                 "accepted_windows": [],
                 "accepted_window_sources": accepted_source_counts,
+                "history_import_attempted_at": model.get("history_import_attempted_at"),
+                "history_import_completed_at": model.get("history_import_completed_at"),
+                "history_import_last_pair_count": model.get("history_import_last_pair_count"),
                 "rejected_window_count": rejected_count,
                 "rejected_window_sources": rejected_source_counts,
                 "rejected_windows": [
@@ -1792,6 +1795,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if estimate is not None
                 else None
             ),
+            "history_import_attempted_at": model.get("history_import_attempted_at"),
+            "history_import_completed_at": model.get("history_import_completed_at"),
+            "history_import_last_pair_count": model.get("history_import_last_pair_count"),
             "rejected_window_count": rejected_count,
             "rejected_window_sources": rejected_source_counts,
             "rejected_windows": [
@@ -2020,6 +2026,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 current_model["history_import_attempted_at"] = (
                     end_time.isoformat()
                 )
+                current_model["history_import_last_pair_count"] = 0
                 self._battery_capacity_models[vin] = current_model
                 continue
 
@@ -2040,6 +2047,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             imported_model = self._battery_capacity_models.setdefault(vin, {})
             imported_model["history_import_attempted_at"] = end_time.isoformat()
             imported_model["history_import_completed_at"] = end_time.isoformat()
+            imported_model["history_import_last_pair_count"] = len(pairs)
             if not metrics:
                 continue
 
