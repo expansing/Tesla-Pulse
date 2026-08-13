@@ -14,6 +14,7 @@ from typing import Any, Callable
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -279,10 +280,14 @@ _TELEMETRY_STORE_VERSION = 2
 _COMMAND_STATE_CONFIRMATION_TIMEOUT = timedelta(seconds=30)
 _BATTERY_CAPACITY_MIN_SOC_SPAN = 20.0
 _BATTERY_CAPACITY_MAX_SESSION_GAP = timedelta(hours=6)
+_BATTERY_WINDOW_ANCHOR_MAX_AGE = timedelta(minutes=15)
 _BATTERY_CAPACITY_MIN_KWH = 10.0
 _BATTERY_CAPACITY_MAX_KWH = 200.0
 _BATTERY_CAPACITY_MAX_ESTIMATES = 12
 _BATTERY_CAPACITY_RECENT_WINDOW_COUNT = 5
+_BATTERY_WINDOW_MAX_REGRESSION_SAMPLES = 500
+_BATTERY_WINDOW_MIN_REGRESSION_SAMPLES = 3
+_BATTERY_WINDOW_MIN_R_SQUARED = 0.95
 _BATTERY_CAPACITY_SOC_EPSILON = 0.05
 _BATTERY_CAPACITY_REVERSAL_TOLERANCE_PCT = 1.0
 _BATTERY_CAPACITY_REVERSAL_STREAK_LIMIT = 2
@@ -294,6 +299,8 @@ _BATTERY_HIGH_SOC_MAX_OBSERVATIONS = 12
 _BATTERY_HIGH_SOC_WARNING_DEVIATION_PCT = 10.0
 _BATTERY_SNAPSHOT_MAX_DAYS = 400
 _BATTERY_TREND_STABILITY_MAD_PCT = 1.5
+_BATTERY_INTERCEPT_STABILITY_MIN_COUNT = 10
+_BATTERY_INTERCEPT_STABILITY_MAX_MAD_KWH = 1.0
 _TELEMETRY_DIAGNOSTIC_COUNTER_MAX = 10_000
 _BATTERY_HISTORY_LOOKBACK = timedelta(days=30)
 _BATTERY_HISTORY_PAIR_TOLERANCE = timedelta(seconds=2)
@@ -974,6 +981,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         observed_at: datetime | None = None,
         source: str = "live",
         temperature_c: Any = None,
+        charge_energy_added_kwh: Any = None,
+        charge_type: str | None = None,
     ) -> dict[str, Any]:
         """Feed one same-record SOC/energy pair into the window state machine."""
         if (
@@ -997,12 +1006,40 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "energy": float(energy_remaining_kwh),
             "timestamp": now.isoformat(),
             "temperature": temperature,
+            "charge_energy_added": (
+                float(charge_energy_added_kwh)
+                if self._is_finite_number(charge_energy_added_kwh)
+                else None
+            ),
+            "charge_type": charge_type if charge_type in ("ac", "dc") else None,
         }
         normalized_source = "recorder" if source == "recorder" else "live"
 
         model = self._battery_capacity_models.setdefault(vin, {})
         if sample["soc"] >= _BATTERY_HIGH_SOC_MIN_PERCENT:
             self._record_high_soc_observation(model, sample, normalized_source)
+
+        if normalized_source == "live":
+            # Live windows are bounded solely by charge-state transitions (see
+            # record_battery_charge_state) so a session's start/end values are
+            # never taken from a sample that may be offset from the true SOC
+            # at that exact moment. This just tracks the freshest known pair
+            # and lazily anchors a window if the current mode has none yet
+            # (e.g. recovering after a transition whose anchor was too stale).
+            model["latest_live_sample"] = sample
+            mode = model.get("charging_state_mode")
+            live_window = model.get("live_window")
+            if mode is not None and not isinstance(live_window, dict):
+                model["live_window"] = self._new_live_window(sample, mode)
+            elif isinstance(live_window, dict):
+                # Only collected for the regression diagnostic; the window's
+                # own start/end boundary is set solely at charge-state
+                # transitions (see record_battery_charge_state).
+                samples = live_window.setdefault("samples", [])
+                if len(samples) < _BATTERY_WINDOW_MAX_REGRESSION_SAMPLES:
+                    samples.append((sample["soc"], sample["energy"]))
+            return self._battery_capacity_metrics(vin)
+
         active = model.get("active_window")
         if not isinstance(active, dict):
             model["active_window"] = self._new_active_window(sample, normalized_source)
@@ -1070,6 +1107,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "source": source,
             "temp_sum": float(temperature) if temperature is not None else 0.0,
             "temp_count": 1 if temperature is not None else 0,
+            "samples": [(sample["soc"], sample["energy"])],
         }
 
     @staticmethod
@@ -1082,29 +1120,106 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if temperature is not None:
             active["temp_sum"] = float(active.get("temp_sum", 0.0)) + float(temperature)
             active["temp_count"] = int(active.get("temp_count", 0)) + 1
+        samples = active.setdefault("samples", [])
+        if len(samples) < _BATTERY_WINDOW_MAX_REGRESSION_SAMPLES:
+            samples.append((sample["soc"], sample["energy"]))
+
+    @staticmethod
+    def _new_live_window(sample: dict[str, Any], mode: str) -> dict[str, Any]:
+        """Return a charge-state-anchored window pinned to one boundary sample.
+
+        Unlike a recorder window, a live window is never extended sample by
+        sample: its "last" value is only ever overwritten once, by the fresh
+        sample that closes it at the next charge-state transition. Same-frame
+        live samples seen in between are still collected in "samples" purely
+        as a regression diagnostic (see _linear_regression); they never move
+        the window's own start/end boundary.
+        """
+        temperature = sample.get("temperature")
+        return {
+            "start": dict(sample),
+            "last": dict(sample),
+            "direction": "charging" if mode == "charging" else "discharging",
+            "source": "live",
+            "temp_sum": float(temperature) if temperature is not None else 0.0,
+            "temp_count": 1 if temperature is not None else 0,
+            "samples": [(sample["soc"], sample["energy"])],
+        }
+
+    @staticmethod
+    def _is_recent_enough(sample: dict[str, Any], reference_time: datetime) -> bool:
+        """Return whether a sample is close enough to reference_time to trust
+        as the SOC/energy pair at that moment, guarding against a stale or
+        out-of-order pairing being used as a session boundary.
+        """
+        try:
+            sample_time = datetime.fromisoformat(sample["timestamp"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if sample_time.tzinfo is None:
+            return False
+        return abs(reference_time - sample_time) <= _BATTERY_WINDOW_ANCHOR_MAX_AGE
 
     def record_battery_charge_state(
-        self, vin: str, charging_state: Any
+        self,
+        vin: str,
+        charging_state: Any,
+        observed_at: datetime | None = None,
     ) -> dict[str, Any]:
-        """Close a live charging run when Fleet Telemetry reports charging stopped."""
+        """Track charging/resting sessions bounded solely by charge-state.
+
+        A charging window spans exactly from charging-start to charging-end.
+        A resting window spans from charging-end to the next charging-start,
+        covering the full off-charger period (driving, parking, and standby
+        drain) as one session, since intermediate telemetry while parked may
+        be sparse or delayed. Each boundary uses the freshest known live
+        SOC/energy pair rather than accumulating through intermediate
+        samples, so a session's endpoints are never built from values that
+        may be offset in time from each other.
+        """
         if not isinstance(charging_state, str):
             return self._battery_capacity_metrics(vin)
 
-        model = self._battery_capacity_models.get(vin)
-        if not isinstance(model, dict):
+        model = self._battery_capacity_models.setdefault(vin, {})
+        is_charging = charging_state.strip().casefold() == "charging"
+        new_mode = "charging" if is_charging else "resting"
+        previous_mode = model.get("charging_state_mode")
+        model["charging_state_mode"] = new_mode
+
+        anchor = model.get("latest_live_sample")
+        # Persisted models can survive a restart, so latest_live_sample may
+        # be hours old; require the same freshness for the very first
+        # observed transition as for every later one, or a stale sample
+        # could seed a window whose start no longer reflects reality.
+        anchor_is_fresh = (
+            isinstance(anchor, dict)
+            and observed_at is not None
+            and self._is_recent_enough(anchor, observed_at)
+        )
+        if previous_mode is None:
+            # First observed state; nothing to close yet.
+            if anchor_is_fresh and not isinstance(model.get("live_window"), dict):
+                model["live_window"] = self._new_live_window(anchor, new_mode)
             return self._battery_capacity_metrics(vin)
 
-        is_charging = charging_state.strip().casefold() == "charging"
-        model["is_charging"] = is_charging
-        active = model.get("active_window")
-        if (
-            not is_charging
-            and isinstance(active, dict)
-            and active.get("source") == "live"
-            and active.get("direction") == "charging"
-        ):
-            self._finalize_or_discard_window(vin, active)
-            model["active_window"] = None
+        if new_mode == previous_mode:
+            return self._battery_capacity_metrics(vin)
+
+        current_window = model.get("live_window")
+        if isinstance(current_window, dict) and anchor_is_fresh:
+            current_window["last"] = dict(anchor)
+            temperature = anchor.get("temperature")
+            if temperature is not None:
+                current_window["temp_sum"] = (
+                    float(current_window.get("temp_sum", 0.0)) + float(temperature)
+                )
+                current_window["temp_count"] = (
+                    int(current_window.get("temp_count", 0)) + 1
+                )
+            self._finalize_or_discard_window(vin, current_window)
+        model["live_window"] = (
+            self._new_live_window(anchor, new_mode) if anchor_is_fresh else None
+        )
         return self._battery_capacity_metrics(vin)
 
     def flush_active_battery_window(self, vin: str) -> None:
@@ -1144,6 +1259,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             isinstance(active, dict) and active.get("source") == scope
         ):
             model["active_window"] = None
+        if scope in ("all", "live"):
+            model["live_window"] = None
+            model.pop("latest_live_sample", None)
+            model.pop("charging_state_mode", None)
         model["last_reset_scope"] = scope
         model["last_reset"] = datetime.now(timezone.utc).isoformat()
         self._telemetry_store.async_delay_save(self._telemetry_store_payload, 30)
@@ -1180,6 +1299,52 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if temp_count > 0
             else None
         )
+
+        # Regression diagnostics: a linear fit over every same-frame SOC/energy
+        # pair observed while the window was open. This never feeds back into
+        # capacity_kwh above (still a pure endpoint delta); it is only an
+        # independent quality signal, and gates acceptance when it is poor.
+        samples = active.get("samples")
+        regression = (
+            self._linear_regression(samples) if isinstance(samples, list) else None
+        )
+        if regression is not None:
+            slope, intercept, r_squared, rmse = regression
+            regression_fields = {
+                "regression_slope_kwh_per_soc": round(slope, 4),
+                "regression_intercept_kwh": round(intercept, 3),
+                "regression_r_squared": round(r_squared, 4),
+                "regression_rmse_kwh": round(rmse, 4),
+                "regression_sample_count": len(samples),
+            }
+        else:
+            regression_fields = {
+                "regression_slope_kwh_per_soc": None,
+                "regression_intercept_kwh": None,
+                "regression_r_squared": None,
+                "regression_rmse_kwh": None,
+                "regression_sample_count": len(samples) if isinstance(samples, list) else 0,
+            }
+
+        # Charger-side cross-check: compares the charger-metered energy added
+        # this session (ACChargingEnergyIn/DCChargingEnergyIn) against the
+        # BMS-side delta_energy for the same window. Charging-direction
+        # windows only; also purely diagnostic, never used in capacity_kwh.
+        charge_energy_added_kwh = None
+        implied_charging_loss_pct = None
+        charge_type = None
+        if direction == "charging":
+            start_added = start.get("charge_energy_added")
+            end_added = last.get("charge_energy_added")
+            if self._is_finite_number(start_added) and self._is_finite_number(end_added):
+                added_delta = float(end_added) - float(start_added)
+                if added_delta > 0:
+                    charge_energy_added_kwh = round(added_delta, 3)
+                    implied_charging_loss_pct = round(
+                        (added_delta - delta_energy) / added_delta * 100, 2
+                    )
+            charge_type = last.get("charge_type") or start.get("charge_type")
+
         window = {
             "start_soc": round(start_soc, 3),
             "end_soc": round(end_soc, 3),
@@ -1193,14 +1358,27 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "direction": direction,
             "source": source,
             "temperature_c": temperature_c,
+            "charge_energy_added_kwh": charge_energy_added_kwh,
+            "implied_charging_loss_pct": implied_charging_loss_pct,
+            "charge_type": charge_type,
             "rejected": False,
             "rejection_reason": None,
+            **regression_fields,
         }
 
         model = self._battery_capacity_models.setdefault(vin, {})
         if not _BATTERY_CAPACITY_MIN_KWH <= capacity_kwh <= _BATTERY_CAPACITY_MAX_KWH:
             self._store_rejected_window(
                 model, window, f"implausible capacity {capacity_kwh:.1f} kWh"
+            )
+            return
+
+        if regression is not None and r_squared < _BATTERY_WINDOW_MIN_R_SQUARED:
+            self._store_rejected_window(
+                model,
+                window,
+                f"poor linear fit (R\u00b2={r_squared:.4f} < "
+                f"{_BATTERY_WINDOW_MIN_R_SQUARED:.2f})",
             )
             return
 
@@ -1327,6 +1505,62 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for window in windows
         )
         return weighted_sum / total_weight
+
+    @staticmethod
+    def _linear_regression(
+        points: list[tuple[float, float]],
+    ) -> tuple[float, float, float, float] | None:
+        """Fit energy = intercept + slope * soc via ordinary least squares.
+
+        Returns (slope, intercept, r_squared, rmse), or None when there are
+        too few points or the SOC values have no spread to fit against. This
+        is a diagnostic layer only: it never feeds into capacity_kwh, which
+        remains the simple endpoint-based delta calculation.
+        """
+        n = len(points)
+        if n < _BATTERY_WINDOW_MIN_REGRESSION_SAMPLES:
+            return None
+        mean_x = sum(x for x, _ in points) / n
+        mean_y = sum(y for _, y in points) / n
+        ss_xx = sum((x - mean_x) ** 2 for x, _ in points)
+        if ss_xx <= 0:
+            return None
+        ss_xy = sum((x - mean_x) * (y - mean_y) for x, y in points)
+        slope = ss_xy / ss_xx
+        intercept = mean_y - slope * mean_x
+        ss_res = sum((y - (intercept + slope * x)) ** 2 for x, y in points)
+        ss_tot = sum((y - mean_y) ** 2 for _, y in points)
+        r_squared = 1.0 if ss_tot <= 0 else 1.0 - ss_res / ss_tot
+        rmse = math.sqrt(ss_res / n)
+        return slope, intercept, r_squared, rmse
+
+    @staticmethod
+    def _implied_soc_zero_reserve_kwh(
+        observations: list[dict[str, Any]], slope_kwh: float
+    ) -> float | None:
+        """Return the median energy a proportional model misses at 0% SOC.
+
+        If EnergyRemaining were exactly proportional to SOC, each high-SOC
+        observation's energy should equal slope_kwh/100 * soc. A consistent
+        positive gap across observations is evidence of a reserve that
+        persists even at indicated 0% SOC. This is a read-only cross-check
+        against already-collected data; it never feeds back into
+        capacity_kwh or the published estimate.
+        """
+        valid = [
+            observation
+            for observation in observations
+            if isinstance(observation, dict)
+            and TeslaVehicleCommandCoordinator._is_finite_number(observation.get("soc"))
+            and TeslaVehicleCommandCoordinator._is_finite_number(observation.get("energy"))
+        ]
+        if not valid:
+            return None
+        implied = [
+            float(observation["energy"]) - slope_kwh / 100 * float(observation["soc"])
+            for observation in valid
+        ]
+        return float(median(implied))
 
     @staticmethod
     def _median_absolute_deviation(
@@ -1469,6 +1703,15 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "accepted_window_count": 0,
                 "accepted_windows": [],
                 "accepted_window_sources": accepted_source_counts,
+                "implied_soc_zero_reserve_kwh": None,
+                "regression_intercept_sample_count": 0,
+                "regression_intercept_median_kwh": None,
+                "regression_intercept_mad_kwh": None,
+                "regression_intercept_stable": False,
+                "history_import_attempted_at": model.get("history_import_attempted_at"),
+                "history_import_completed_at": model.get("history_import_completed_at"),
+                "history_import_last_pair_count": model.get("history_import_last_pair_count"),
+                "history_import_last_failure_at": model.get("history_import_last_failure_at"),
                 "rejected_window_count": rejected_count,
                 "rejected_window_sources": rejected_source_counts,
                 "rejected_windows": [
@@ -1478,6 +1721,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "end_time": window.get("end_time"),
                         "source": window.get("source", "unknown"),
                         "rejection_reason": window.get("rejection_reason"),
+                        "regression_r_squared": window.get("regression_r_squared"),
+                        "charge_energy_added_kwh": window.get("charge_energy_added_kwh"),
+                        "implied_charging_loss_pct": window.get("implied_charging_loss_pct"),
+                        "charge_type": window.get("charge_type"),
                     }
                     for window in rejected_windows
                 ],
@@ -1497,6 +1744,27 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             abs(high_soc_median - estimate) / estimate * 100
             if high_soc_median is not None and estimate not in (None, 0)
             else None
+        )
+        implied_soc_zero_reserve_kwh = (
+            self._implied_soc_zero_reserve_kwh(observations, float(estimate))
+            if isinstance(observations, list) and estimate is not None
+            else None
+        )
+        intercepts = [
+            float(window["regression_intercept_kwh"])
+            for window in windows
+            if self._is_finite_number(window.get("regression_intercept_kwh"))
+        ]
+        intercept_median = median(intercepts) if intercepts else None
+        intercept_mad = (
+            self._median_absolute_deviation(intercepts, float(intercept_median))
+            if intercept_median is not None
+            else None
+        )
+        intercept_stable = bool(
+            len(intercepts) >= _BATTERY_INTERCEPT_STABILITY_MIN_COUNT
+            and intercept_mad is not None
+            and intercept_mad <= _BATTERY_INTERCEPT_STABILITY_MAX_MAD_KWH
         )
         snapshots = model.get("daily_snapshots")
         recent_snapshots = [
@@ -1552,6 +1820,13 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "direction": window.get("direction"),
                 "source": window.get("source", "unknown"),
                 "temperature_c": window.get("temperature_c"),
+                "regression_slope_kwh_per_soc": window.get("regression_slope_kwh_per_soc"),
+                "regression_r_squared": window.get("regression_r_squared"),
+                "regression_rmse_kwh": window.get("regression_rmse_kwh"),
+                "regression_sample_count": window.get("regression_sample_count"),
+                "charge_energy_added_kwh": window.get("charge_energy_added_kwh"),
+                "implied_charging_loss_pct": window.get("implied_charging_loss_pct"),
+                "charge_type": window.get("charge_type"),
             }
             for window in windows
         ]
@@ -1573,6 +1848,19 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 high_soc_deviation is not None
                 and high_soc_deviation > _BATTERY_HIGH_SOC_WARNING_DEVIATION_PCT
             ),
+            "implied_soc_zero_reserve_kwh": (
+                round(implied_soc_zero_reserve_kwh, 3)
+                if implied_soc_zero_reserve_kwh is not None
+                else None
+            ),
+            "regression_intercept_sample_count": len(intercepts),
+            "regression_intercept_median_kwh": (
+                round(intercept_median, 3) if intercept_median is not None else None
+            ),
+            "regression_intercept_mad_kwh": (
+                round(intercept_mad, 3) if intercept_mad is not None else None
+            ),
+            "regression_intercept_stable": intercept_stable,
             "daily_snapshots_30d": recent_snapshots,
             "daily_snapshot_change_30d_kwh": trend_change_kwh,
             "daily_snapshot_trend_stable": trend_stable,
@@ -1582,6 +1870,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if estimate is not None
                 else None
             ),
+            "history_import_attempted_at": model.get("history_import_attempted_at"),
+            "history_import_completed_at": model.get("history_import_completed_at"),
+            "history_import_last_pair_count": model.get("history_import_last_pair_count"),
+            "history_import_last_failure_at": model.get("history_import_last_failure_at"),
             "rejected_window_count": rejected_count,
             "rejected_window_sources": rejected_source_counts,
             "rejected_windows": [
@@ -1591,6 +1883,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "end_time": window.get("end_time"),
                     "source": window.get("source", "unknown"),
                     "rejection_reason": window.get("rejection_reason"),
+                    "regression_r_squared": window.get("regression_r_squared"),
+                    "charge_energy_added_kwh": window.get("charge_energy_added_kwh"),
+                    "implied_charging_loss_pct": window.get("implied_charging_loss_pct"),
+                    "charge_type": window.get("charge_type"),
                 }
                 for window in rejected_windows
             ],
@@ -1675,8 +1971,19 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "last_sample",
                 "direction",
                 "latest_live_capacity_observation",
+                "is_charging",
             )
         }
+        # A live window from before charge-state-bounded windowing existed
+        # cannot be scored by either mechanism going forward; carry it over
+        # as the starting point for the new live window instead of losing it.
+        legacy_active = migrated.get("active_window")
+        if isinstance(legacy_active, dict) and legacy_active.get("source") == "live":
+            migrated["live_window"] = legacy_active
+            migrated["active_window"] = None
+            migrated["charging_state_mode"] = (
+                "charging" if legacy_active.get("direction") == "charging" else "resting"
+            )
         migrated["accepted_windows"] = accepted[-_BATTERY_CAPACITY_MAX_ESTIMATES:]
         rejected = migrated.get("rejected_windows")
         migrated["rejected_windows"] = (
@@ -1705,6 +2012,26 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         migrated["model_version"] = _BATTERY_CAPACITY_MODEL_VERSION
         return migrated
 
+    @staticmethod
+    def _history_import_is_throttled(model: dict[str, Any], now: datetime) -> bool:
+        """Return whether a Recorder history-import attempt should be skipped.
+
+        Only a recent failure throttles retries; a successful run (with or
+        without new pairs) never blocks the next restart's incremental
+        catch-up, since that query is already bounded to whatever is new
+        since the last completed import.
+        """
+        last_failure = model.get("history_import_last_failure_at")
+        if not isinstance(last_failure, str):
+            return False
+        try:
+            last_failure_at = datetime.fromisoformat(last_failure)
+        except ValueError:
+            return False
+        if last_failure_at.tzinfo is None:
+            return False
+        return now - last_failure_at < _BATTERY_HISTORY_RETRY_INTERVAL
+
     async def async_import_battery_history(self) -> None:
         """Seed capacity estimates from tightly paired Recorder history states."""
         if "recorder" not in self.hass.config.components:
@@ -1721,19 +2048,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for vehicle in self._vehicles:
             vin = vehicle["vin"]
             model = self._battery_capacity_models.get(vin, {})
-            last_attempt = model.get("history_import_attempted_at")
-            if isinstance(last_attempt, str):
-                try:
-                    last_attempt_at = datetime.fromisoformat(last_attempt)
-                except ValueError:
-                    pass
-                else:
-                    if (
-                        last_attempt_at.tzinfo is not None
-                        and end_time - last_attempt_at
-                        < _BATTERY_HISTORY_RETRY_INTERVAL
-                    ):
-                        continue
+            if self._history_import_is_throttled(model, end_time):
+                continue
 
             soc_entity_id = entity_registry.async_get_entity_id(
                 "sensor", DOMAIN, f"{vin}_battery_level"
@@ -1786,6 +2102,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 failed_model["history_import_attempted_at"] = (
                     end_time.isoformat()
                 )
+                failed_model["history_import_last_failure_at"] = (
+                    end_time.isoformat()
+                )
                 attempted = True
                 continue
 
@@ -1795,11 +2114,23 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 current_model["history_import_attempted_at"] = (
                     end_time.isoformat()
                 )
+                # Nothing new in this range; still a successful, completed
+                # check, so the watermark advances and next restart is not
+                # throttled the way a genuine failure would be.
+                current_model["history_import_completed_at"] = (
+                    end_time.isoformat()
+                )
+                current_model["history_import_last_pair_count"] = 0
                 self._battery_capacity_models[vin] = current_model
                 continue
 
-            active_window = current_model.get("active_window")
-            current_model["active_window"] = None
+            # A session in progress at the end of this batch is left open
+            # rather than force-closed, so a later restart's next batch can
+            # continue it; the existing reversal/gap logic in
+            # record_battery_capacity_sample closes it naturally once a real
+            # reversal or a 6-hour gap occurs. Force-closing it here would
+            # fragment one continuous session into multiple sub-20%-span
+            # pieces whenever an import happens to land mid-session.
             for observed_at, soc_percent, energy_remaining_kwh in pairs:
                 self.record_battery_capacity_sample(
                     vin,
@@ -1808,13 +2139,11 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     observed_at,
                     source="recorder",
                 )
-            self.flush_active_battery_window(vin)
-            if isinstance(active_window, dict):
-                current_model["active_window"] = active_window
             metrics = self._battery_capacity_metrics(vin)
             imported_model = self._battery_capacity_models.setdefault(vin, {})
             imported_model["history_import_attempted_at"] = end_time.isoformat()
             imported_model["history_import_completed_at"] = end_time.isoformat()
+            imported_model["history_import_last_pair_count"] = len(pairs)
             if not metrics:
                 continue
 
@@ -2389,7 +2718,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         vin, telemetry_generation, telemetry_event
                     )
                 except TimeoutError as err:
-                    raise RuntimeError(
+                    raise HomeAssistantError(
                         f"Vehicle {vin} did not become ready within "
                         f"{WAKE_TELEMETRY_TIMEOUT_SECONDS} seconds after wake-up"
                     ) from err
