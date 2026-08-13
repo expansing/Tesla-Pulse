@@ -468,6 +468,54 @@ def test_stale_anchor_at_transition_discards_the_window_and_recovers_on_next_sam
     assert model["live_window"]["start"]["soc"] == 79.0
 
 
+def test_stale_persisted_sample_does_not_seed_a_window_on_first_observed_state(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A stale sample that survived a restart cannot seed the very first window.
+
+    battery_capacity_models are persisted, so latest_live_sample can be
+    hours old after a restart even though charging_state_mode was reset.
+    The first observed charge-state transition must apply the same
+    15-minute freshness guard as every later transition, or a stale
+    sample would seed a window whose start no longer reflects reality.
+    """
+    coordinator._battery_capacity_models[VIN] = {
+        "latest_live_sample": {
+            "soc": 50.0,
+            "energy": 32.5,
+            "timestamp": START.isoformat(),
+            "temperature": None,
+        },
+    }
+
+    coordinator.record_battery_charge_state(
+        VIN, "Charging", observed_at=START + timedelta(hours=2)
+    )
+
+    assert coordinator._battery_capacity_models[VIN].get("live_window") is None
+
+
+def test_fresh_persisted_sample_still_seeds_a_window_on_first_observed_state(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A still-fresh persisted sample can seed the very first window as before."""
+    coordinator._battery_capacity_models[VIN] = {
+        "latest_live_sample": {
+            "soc": 50.0,
+            "energy": 32.5,
+            "timestamp": START.isoformat(),
+            "temperature": None,
+        },
+    }
+
+    coordinator.record_battery_charge_state(
+        VIN, "Charging", observed_at=START + timedelta(minutes=5)
+    )
+
+    model = coordinator._battery_capacity_models[VIN]
+    assert model["live_window"]["start"]["soc"] == 50.0
+
+
 def test_rapid_charge_state_flapping_with_fresh_anchors_does_not_corrupt_state(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
@@ -2130,4 +2178,12 @@ def test_r_squared_gate_rejects_a_window_just_below_the_threshold(
     model = coordinator._battery_capacity_models[VIN]
     assert model.get("accepted_windows", []) == []
     assert len(model["rejected_windows"]) == 1
+    reason = model["rejected_windows"][0]["rejection_reason"]
+    # A value that would round to the 0.95 threshold at 3 decimals (0.9499
+    # -> "0.950") must not be displayable as if it had passed; require
+    # enough precision to show it is actually below the threshold, and
+    # the threshold itself for an unambiguous message.
+    assert "0.9499" in reason
+    assert "0.95" in reason
+    assert "0.950)" not in reason
     assert "poor linear fit" in model["rejected_windows"][0]["rejection_reason"]

@@ -1187,20 +1187,24 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         model["charging_state_mode"] = new_mode
 
         anchor = model.get("latest_live_sample")
+        # Persisted models can survive a restart, so latest_live_sample may
+        # be hours old; require the same freshness for the very first
+        # observed transition as for every later one, or a stale sample
+        # could seed a window whose start no longer reflects reality.
+        anchor_is_fresh = (
+            isinstance(anchor, dict)
+            and observed_at is not None
+            and self._is_recent_enough(anchor, observed_at)
+        )
         if previous_mode is None:
             # First observed state; nothing to close yet.
-            if isinstance(anchor, dict) and not isinstance(model.get("live_window"), dict):
+            if anchor_is_fresh and not isinstance(model.get("live_window"), dict):
                 model["live_window"] = self._new_live_window(anchor, new_mode)
             return self._battery_capacity_metrics(vin)
 
         if new_mode == previous_mode:
             return self._battery_capacity_metrics(vin)
 
-        anchor_is_fresh = (
-            isinstance(anchor, dict)
-            and observed_at is not None
-            and self._is_recent_enough(anchor, observed_at)
-        )
         current_window = model.get("live_window")
         if isinstance(current_window, dict) and anchor_is_fresh:
             current_window["last"] = dict(anchor)
@@ -1369,12 +1373,12 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return
 
-        if (
-            regression is not None
-            and regression[2] < _BATTERY_WINDOW_MIN_R_SQUARED
-        ):
+        if regression is not None and r_squared < _BATTERY_WINDOW_MIN_R_SQUARED:
             self._store_rejected_window(
-                model, window, f"poor linear fit (R\u00b2={regression[2]:.3f})"
+                model,
+                window,
+                f"poor linear fit (R\u00b2={r_squared:.4f} < "
+                f"{_BATTERY_WINDOW_MIN_R_SQUARED:.2f})",
             )
             return
 
