@@ -111,6 +111,27 @@ def test_starting_a_new_active_window_does_not_change_the_published_estimate(
     assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 65.0
 
 
+def test_recorder_sample_replaces_an_active_window_owned_by_another_source(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A Recorder rebuild cannot extend a legacy active live window."""
+    coordinator._battery_capacity_models[VIN] = {
+        "active_window": {
+            "source": "live",
+            "start": {"soc": 50.0, "energy": 32.5, "timestamp": START.isoformat()},
+            "last": {"soc": 60.0, "energy": 39.0, "timestamp": START.isoformat()},
+        }
+    }
+
+    coordinator.record_battery_capacity_sample(
+        VIN, 54, 36.0, observed_at=START, source="recorder"
+    )
+
+    active = coordinator._battery_capacity_models[VIN]["active_window"]
+    assert active["source"] == "recorder"
+    assert active["start"]["soc"] == 54.0
+
+
 def test_recorder_small_reversal_jitter_does_not_finalize_the_active_window(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
@@ -1308,6 +1329,10 @@ def test_reset_battery_history_removes_only_the_selected_source(
             {"source": "recorder"},
         ],
         "active_window": {"source": "recorder"},
+        "history_import_attempted_at": START.isoformat(),
+        "history_import_completed_at": START.isoformat(),
+        "history_import_last_pair_count": 12,
+        "history_import_last_failure_at": START.isoformat(),
     }
 
     coordinator.reset_battery_capacity_history(VIN, "recorder")
@@ -1318,7 +1343,25 @@ def test_reset_battery_history_removes_only_the_selected_source(
     ]
     assert model["rejected_windows"] == [{"source": "live"}]
     assert model["active_window"] is None
+    assert "history_import_attempted_at" not in model
+    assert "history_import_completed_at" not in model
+    assert "history_import_last_pair_count" not in model
+    assert "history_import_last_failure_at" not in model
     assert model["last_reset_scope"] == "recorder"
+
+
+def test_live_reset_preserves_recorder_import_checkpoint(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Resetting only live evidence must not cause an unrelated history rebuild."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"source": "live", "capacity_kwh": 65.0, "delta_soc": 20.0}],
+        "history_import_completed_at": START.isoformat(),
+    }
+
+    coordinator.reset_battery_capacity_history(VIN, "live")
+
+    assert coordinator._battery_capacity_models[VIN]["history_import_completed_at"] == START.isoformat()
 
 
 def test_reset_battery_history_discards_invalid_window_entries(

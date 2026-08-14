@@ -191,9 +191,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_reset_battery_history(call: ServiceCall) -> None:
         """Discard the selected persisted SOH estimator evidence."""
-        coordinator_for_vin(call.data["vin"]).reset_battery_capacity_history(
-            call.data["vin"], call.data["scope"]
-        )
+        coordinator = coordinator_for_vin(call.data["vin"])
+        scope = call.data["scope"]
+        coordinator.reset_battery_capacity_history(call.data["vin"], scope)
+        if scope in ("all", "recorder"):
+            await coordinator.async_import_battery_history()
 
     async def handle_rescan_capabilities(call: ServiceCall) -> None:
         """Clear capability conclusions and start a new observation run."""
