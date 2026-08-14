@@ -1042,7 +1042,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return self._battery_capacity_metrics(vin)
 
         active = model.get("active_window")
-        if not isinstance(active, dict):
+        if (
+            not isinstance(active, dict)
+            or active.get("source") != normalized_source
+        ):
             model["active_window"] = self._new_active_window(sample, normalized_source)
             return self._battery_capacity_metrics(vin)
 
@@ -1284,6 +1287,14 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             model["live_window"] = None
             model.pop("latest_live_sample", None)
             model.pop("charging_state_mode", None)
+        if scope in ("all", "recorder"):
+            for key in (
+                "history_import_attempted_at",
+                "history_import_completed_at",
+                "history_import_last_pair_count",
+                "history_import_last_failure_at",
+            ):
+                model.pop(key, None)
         model["last_reset_scope"] = scope
         model["last_reset"] = datetime.now(timezone.utc).isoformat()
         self._telemetry_store.async_delay_save(self._telemetry_store_payload, 30)
