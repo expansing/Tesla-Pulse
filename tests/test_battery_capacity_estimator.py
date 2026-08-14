@@ -91,6 +91,8 @@ def test_records_a_valid_window_and_calculates_soh(
 
     assert coordinator._battery_capacity_metrics(VIN) == {
         "estimated_usable_capacity": 65.0,
+        "soc_window_capacity_kwh": 65.0,
+        "bms_energy_offset_kwh": None,
         "battery_soh_confidence": 20.0,
         "estimated_battery_soh": 88.4,
     }
@@ -412,6 +414,8 @@ def test_charge_stop_updates_an_estimate_with_more_weighted_new_evidence(
 
     assert coordinator._battery_capacity_metrics(VIN) == {
         "estimated_usable_capacity": 65.0,
+        "soc_window_capacity_kwh": 65.0,
+        "bms_energy_offset_kwh": None,
         "battery_soh_confidence": 30.0,
         "estimated_battery_soh": 88.4,
     }
@@ -748,7 +752,7 @@ def test_tied_end_time_is_handled_deterministically_by_the_weighted_average(
         },
     ]
 
-    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 63.89
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 63.886
 
 
 def test_recorder_window_with_later_end_time_outranks_an_older_live_window(
@@ -771,7 +775,7 @@ def test_recorder_window_with_later_end_time_outranks_an_older_live_window(
         },
     ]
 
-    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 63.89
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 63.886
 
 
 def test_live_window_with_later_end_time_outranks_an_older_recorder_window(
@@ -794,7 +798,7 @@ def test_live_window_with_later_end_time_outranks_an_older_recorder_window(
         },
     ]
 
-    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 63.89
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 63.886
 
 
 def test_confidence_diagnostics_report_recent_span_and_historical_total(
@@ -868,7 +872,7 @@ def test_one_small_session_cannot_override_several_large_recent_charges(
         START + timedelta(days=3, hours=1),
     )
 
-    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 64.18
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 64.184
 
 
 def test_a_large_reliable_session_is_not_suppressed_by_several_smaller_ones(
@@ -894,7 +898,7 @@ def test_a_large_reliable_session_is_not_suppressed_by_several_smaller_ones(
     assert coordinator._weighted_median_capacity(windows) == 62.0
 
     # The published estimate must not reproduce that suppression.
-    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 63.47
+    assert coordinator._battery_capacity_metrics(VIN)["estimated_usable_capacity"] == 63.474
 
 
 def test_capacity_diagnostics_expose_how_many_windows_back_the_estimate(
@@ -1490,6 +1494,7 @@ def test_capacity_diagnostics_include_sources_ranges_and_rejections(
             "end_time": "2026-01-01T00:00:00+00:00",
             "source": "recorder",
             "rejection_reason": "deviates from rolling median",
+            "regression_intercept_kwh": None,
             "regression_r_squared": None,
             "charge_energy_added_kwh": None,
             "implied_charging_loss_pct": None,
@@ -1774,19 +1779,19 @@ def _windows_with_intercepts(intercepts: list[float]) -> list[dict[str, Any]]:
 def test_regression_intercept_stability_requires_the_minimum_sample_count(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
-    """Fewer than 10 windows with a fitted intercept is not enough to call it stable.
+    """Fewer than nine windows with a fitted intercept is not enough to call it stable.
 
     Guards against declaring the SOC=0% reserve hypothesis confirmed from a
     handful of sessions, per the recommendation to validate over 10-20
     completed windows before treating the intercept as a genuine offset.
     """
     coordinator._battery_capacity_models[VIN] = {
-        "accepted_windows": _windows_with_intercepts([3.0] * 9),
+        "accepted_windows": _windows_with_intercepts([3.0] * 8),
     }
 
     diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
 
-    assert diagnostics["regression_intercept_sample_count"] == 9
+    assert diagnostics["regression_intercept_sample_count"] == 8
     assert diagnostics["regression_intercept_median_kwh"] == 3.0
     assert diagnostics["regression_intercept_mad_kwh"] == 0.0
     assert diagnostics["regression_intercept_stable"] is False
@@ -1795,17 +1800,189 @@ def test_regression_intercept_stability_requires_the_minimum_sample_count(
 def test_regression_intercept_stability_is_true_for_a_tight_cluster(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
-    """A tight cluster of >=10 fitted intercepts is reported as stable."""
+    """A tight cluster of >=9 fitted intercepts is reported as stable."""
     coordinator._battery_capacity_models[VIN] = {
         "accepted_windows": _windows_with_intercepts(
-            [2.6, 2.8, 2.9, 3.0, 3.0, 3.1, 3.2, 3.3, 3.3, 3.4]
+            [2.6, 2.8, 2.9, 3.0, 3.0, 3.1, 3.2, 3.3, 3.3]
         ),
     }
 
     diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
 
-    assert diagnostics["regression_intercept_sample_count"] == 10
+    assert diagnostics["regression_intercept_sample_count"] == 9
     assert diagnostics["regression_intercept_stable"] is True
+
+
+def test_stable_regression_offset_publishes_bms_energy_at_100_percent(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """SOH compares the original 100%-SOC reference to the same BMS basis.
+
+    The endpoint delta remains the SOC-window slope, but once nine fitted
+    windows agree on a tight non-zero intercept, the BMS's reported energy
+    at indicated 100% is slope plus that stable offset.
+    """
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": _windows_with_intercepts([3.0] * 9),
+    }
+
+    metrics = coordinator._battery_capacity_metrics(VIN)
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+    soh_diagnostics = coordinator.get_battery_soh_diagnostics(VIN)
+
+    assert metrics == {
+        "estimated_usable_capacity": 65.0,
+        "soc_window_capacity_kwh": 62.0,
+        "bms_energy_offset_kwh": 3.0,
+        "battery_soh_confidence": 100.0,
+        "estimated_battery_soh": 88.4,
+    }
+    assert diagnostics["bms_energy_at_100_percent_kwh"] == 65.0
+    assert diagnostics["published_capacity_uses_bms_offset"] is True
+    assert soh_diagnostics["usable_capacity_kwh"] == 65.0
+    assert soh_diagnostics["soc_window_capacity_kwh"] == 62.0
+    assert soh_diagnostics["bms_energy_offset_kwh"] == 3.0
+
+
+def test_published_bms_capacity_equals_its_displayed_components(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Rounded API fields retain the exact published slope-plus-offset identity."""
+    windows = _windows_with_intercepts([3.0045] * 9)
+    for window in windows:
+        window["capacity_kwh"] = 62.1244
+    coordinator._battery_capacity_models[VIN] = {"accepted_windows": windows}
+
+    metrics = coordinator._battery_capacity_metrics(VIN)
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert metrics["estimated_usable_capacity"] == round(
+        metrics["soc_window_capacity_kwh"] + metrics["bms_energy_offset_kwh"], 3
+    )
+    assert diagnostics["bms_energy_at_100_percent_kwh"] == metrics[
+        "estimated_usable_capacity"
+    ]
+
+
+def test_intercept_stability_is_pack_size_neutral(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """The same 1.4% intercept spread is treated equally across pack sizes."""
+    intercepts = [2.3, 2.3, 2.3, 3.0, 3.0, 3.0, 3.7, 3.7, 3.7]
+    small_pack_windows = _windows_with_intercepts(intercepts)
+    large_pack_windows = _windows_with_intercepts(intercepts)
+    for window in small_pack_windows:
+        window["capacity_kwh"] = 50.0
+    for window in large_pack_windows:
+        window["capacity_kwh"] = 100.0
+
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": small_pack_windows,
+    }
+    small_pack_stable = coordinator.get_battery_capacity_diagnostics(VIN)[
+        "regression_intercept_stable"
+    ]
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": large_pack_windows,
+    }
+    large_pack_stable = coordinator.get_battery_capacity_diagnostics(VIN)[
+        "regression_intercept_stable"
+    ]
+
+    assert small_pack_stable is True
+    assert large_pack_stable is True
+
+
+def test_intercept_stability_accepts_mad_at_the_relative_threshold(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """The inclusive 1.5%-of-capacity MAD boundary activates the offset."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": _windows_with_intercepts(
+            [2.1, 2.1, 2.1, 3.0, 3.0, 3.0, 3.9, 3.9, 3.9]
+        ),
+    }
+    # 62 kWh default capacity gives a 0.93 kWh limit; use 60 kWh so the
+    # 0.9 kWh MAD lands exactly on the 1.5% boundary.
+    for window in coordinator._battery_capacity_models[VIN]["accepted_windows"]:
+        window["capacity_kwh"] = 60.0
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert diagnostics["regression_intercept_mad_kwh"] == pytest.approx(0.9)
+    assert diagnostics["regression_intercept_stable"] is True
+
+
+def test_intercept_stability_rejects_mad_above_the_relative_threshold(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Nine fitted windows still fall back when their relative spread is too wide."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": _windows_with_intercepts(
+            [2.09, 2.09, 2.09, 3.0, 3.0, 3.0, 3.91, 3.91, 3.91]
+        ),
+    }
+    for window in coordinator._battery_capacity_models[VIN]["accepted_windows"]:
+        window["capacity_kwh"] = 60.0
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert diagnostics["regression_intercept_mad_kwh"] == pytest.approx(0.91)
+    assert diagnostics["regression_intercept_stable"] is False
+
+
+def test_stable_positive_offset_aligns_high_soc_comparison_with_bms_capacity(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """High-SOC comparison switches from slope to BMS-at-100% energy when stable."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": _windows_with_intercepts([2.0] * 9),
+        "high_soc_observations": [
+            {"soc": 98.0, "energy": 62.76, "capacity_kwh": 64.041},
+            {"soc": 100.0, "energy": 64.0, "capacity_kwh": 64.0},
+        ],
+    }
+
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert diagnostics["soc_window_capacity_kwh"] == 62.0
+    assert diagnostics["bms_energy_at_100_percent_kwh"] == 64.0
+    assert diagnostics["high_soc_comparison_capacity_kwh"] == pytest.approx(64.02)
+    assert diagnostics["high_soc_deviation_percent"] == pytest.approx(0.03)
+
+
+def test_stable_negative_intercept_never_reduces_published_bms_energy(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A consistent negative fit is treated as invalid offset evidence."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": _windows_with_intercepts([-2.0] * 9),
+    }
+
+    metrics = coordinator._battery_capacity_metrics(VIN)
+
+    assert metrics["estimated_usable_capacity"] == 62.0
+    assert metrics["bms_energy_offset_kwh"] is None
+
+
+def test_unstable_regression_offset_keeps_slope_only_capacity_published(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A scattered intercept cannot silently redefine the SOH basis."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": _windows_with_intercepts(
+            [-4.0, -2.0, 0.0, 1.0, 3.0, 5.0, 6.0, 8.0, 9.0]
+        ),
+    }
+
+    metrics = coordinator._battery_capacity_metrics(VIN)
+    diagnostics = coordinator.get_battery_capacity_diagnostics(VIN)
+
+    assert metrics["estimated_usable_capacity"] == 62.0
+    assert metrics["soc_window_capacity_kwh"] == 62.0
+    assert metrics["bms_energy_offset_kwh"] is None
+    assert diagnostics["bms_energy_at_100_percent_kwh"] is None
+    assert diagnostics["published_capacity_uses_bms_offset"] is False
 
 
 def test_regression_intercept_stability_is_false_for_scattered_values(

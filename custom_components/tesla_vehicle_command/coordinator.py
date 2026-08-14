@@ -299,8 +299,8 @@ _BATTERY_HIGH_SOC_MAX_OBSERVATIONS = 12
 _BATTERY_HIGH_SOC_WARNING_DEVIATION_PCT = 10.0
 _BATTERY_SNAPSHOT_MAX_DAYS = 400
 _BATTERY_TREND_STABILITY_MAD_PCT = 1.5
-_BATTERY_INTERCEPT_STABILITY_MIN_COUNT = 10
-_BATTERY_INTERCEPT_STABILITY_MAX_MAD_KWH = 1.0
+_BATTERY_INTERCEPT_STABILITY_MIN_COUNT = 9
+_BATTERY_INTERCEPT_STABILITY_MAD_PCT = 1.5
 _TELEMETRY_DIAGNOSTIC_COUNTER_MAX = 10_000
 _BATTERY_HISTORY_LOOKBACK = timedelta(days=30)
 _BATTERY_HISTORY_PAIR_TOLERANCE = timedelta(seconds=2)
@@ -1648,6 +1648,36 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return 0.0
         return float(median([abs(value - center) for value in values]))
 
+    @classmethod
+    def _stable_regression_intercept(
+        cls, windows: list[dict[str, Any]]
+    ) -> tuple[float | None, float | None, bool]:
+        """Return the fitted BMS offset and whether it is consistent enough to use."""
+        intercepts = [
+            float(window["regression_intercept_kwh"])
+            for window in windows
+            if cls._is_finite_number(window.get("regression_intercept_kwh"))
+        ]
+        if not intercepts:
+            return None, None, False
+        intercept_median = float(median(intercepts))
+        intercept_mad = cls._median_absolute_deviation(intercepts, intercept_median)
+        capacities = [
+            float(window["capacity_kwh"])
+            for window in windows
+            if cls._is_finite_number(window.get("capacity_kwh"))
+        ]
+        capacity_median = float(median(capacities)) if capacities else None
+        return (
+            intercept_median,
+            intercept_mad,
+            len(intercepts) >= _BATTERY_INTERCEPT_STABILITY_MIN_COUNT
+            and intercept_median > 0
+            and capacity_median is not None
+            and intercept_mad
+            <= capacity_median * _BATTERY_INTERCEPT_STABILITY_MAD_PCT / 100,
+        )
+
     @staticmethod
     def _parse_window_end_time(window: dict[str, Any]) -> datetime | None:
         """Return a window's parsed, timezone-aware end_time, if valid."""
@@ -1717,13 +1747,24 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         estimate = self._weighted_average_capacity(recent_windows)
         if estimate is None:
             return {}
-        estimated_capacity = round(float(estimate), 2)
+        soc_window_capacity = float(estimate)
+        intercept, _, intercept_stable = self._stable_regression_intercept(windows)
+        displayed_slope = round(soc_window_capacity, 3)
+        displayed_offset = round(intercept, 3) if intercept_stable else None
+        estimated_capacity = round(
+            displayed_slope + displayed_offset
+            if displayed_offset is not None
+            else displayed_slope,
+            3,
+        )
         confidence = round(
             min(100.0, sum(float(window["delta_soc"]) for window in recent_windows)),
             1,
         )
         metrics: dict[str, Any] = {
             "estimated_usable_capacity": estimated_capacity,
+            "soc_window_capacity_kwh": displayed_slope,
+            "bms_energy_offset_kwh": displayed_offset,
             "battery_soh_confidence": confidence,
         }
         reference_capacity_kwh = self._battery_reference_capacity(vin)
@@ -1791,6 +1832,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "accepted_window_sources": accepted_source_counts,
                 "recorder_window_in_progress": recorder_window_in_progress,
                 "live_window_in_progress": live_window_in_progress,
+                "soc_window_capacity_kwh": None,
+                "bms_energy_offset_kwh": None,
+                "bms_energy_at_100_percent_kwh": None,
+                "published_capacity_uses_bms_offset": False,
                 "implied_soc_zero_reserve_kwh": None,
                 "regression_intercept_sample_count": 0,
                 "regression_intercept_median_kwh": None,
@@ -1820,6 +1865,26 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         capacities = [float(window["capacity_kwh"]) for window in windows]
         estimate = self._weighted_average_capacity(self._recent_accepted_windows(windows))
+        intercepts = [
+            float(window["regression_intercept_kwh"])
+            for window in windows
+            if self._is_finite_number(window.get("regression_intercept_kwh"))
+        ]
+        intercept_median, intercept_mad, intercept_stable = (
+            self._stable_regression_intercept(windows)
+        )
+        displayed_slope = round(float(estimate), 3) if estimate is not None else None
+        displayed_offset = round(intercept_median, 3) if intercept_stable else None
+        bms_energy_at_100_percent = (
+            round(displayed_slope + displayed_offset, 3)
+            if displayed_slope is not None and displayed_offset is not None
+            else None
+        )
+        published_capacity = (
+            bms_energy_at_100_percent
+            if bms_energy_at_100_percent is not None
+            else estimate
+        )
         observations = model.get("high_soc_observations")
         high_soc_capacities = [
             float(observation["capacity_kwh"])
@@ -1829,30 +1894,14 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ] if isinstance(observations, list) else []
         high_soc_median = median(high_soc_capacities) if high_soc_capacities else None
         high_soc_deviation = (
-            abs(high_soc_median - estimate) / estimate * 100
-            if high_soc_median is not None and estimate not in (None, 0)
+            abs(high_soc_median - published_capacity) / published_capacity * 100
+            if high_soc_median is not None and published_capacity not in (None, 0)
             else None
         )
         implied_soc_zero_reserve_kwh = (
             self._implied_soc_zero_reserve_kwh(observations, float(estimate))
             if isinstance(observations, list) and estimate is not None
             else None
-        )
-        intercepts = [
-            float(window["regression_intercept_kwh"])
-            for window in windows
-            if self._is_finite_number(window.get("regression_intercept_kwh"))
-        ]
-        intercept_median = median(intercepts) if intercepts else None
-        intercept_mad = (
-            self._median_absolute_deviation(intercepts, float(intercept_median))
-            if intercept_median is not None
-            else None
-        )
-        intercept_stable = bool(
-            len(intercepts) >= _BATTERY_INTERCEPT_STABILITY_MIN_COUNT
-            and intercept_mad is not None
-            and intercept_mad <= _BATTERY_INTERCEPT_STABILITY_MAX_MAD_KWH
         )
         snapshots = model.get("daily_snapshots")
         recent_snapshots = [
@@ -1909,6 +1958,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "source": window.get("source", "unknown"),
                 "temperature_c": window.get("temperature_c"),
                 "regression_slope_kwh_per_soc": window.get("regression_slope_kwh_per_soc"),
+                "regression_intercept_kwh": window.get("regression_intercept_kwh"),
                 "regression_r_squared": window.get("regression_r_squared"),
                 "regression_rmse_kwh": window.get("regression_rmse_kwh"),
                 "regression_sample_count": window.get("regression_sample_count"),
@@ -1925,6 +1975,18 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "accepted_window_sources": accepted_source_counts,
             "recorder_window_in_progress": recorder_window_in_progress,
             "live_window_in_progress": live_window_in_progress,
+            "soc_window_capacity_kwh": (
+                displayed_slope
+            ),
+            "bms_energy_offset_kwh": (
+                displayed_offset
+            ),
+            "bms_energy_at_100_percent_kwh": (
+                round(bms_energy_at_100_percent, 3)
+                if bms_energy_at_100_percent is not None
+                else None
+            ),
+            "published_capacity_uses_bms_offset": intercept_stable,
             "accepted_capacity_min_kwh": round(min(capacities), 3),
             "accepted_capacity_max_kwh": round(max(capacities), 3),
             "high_soc_observation_count": len(high_soc_capacities),
@@ -1973,6 +2035,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "end_time": window.get("end_time"),
                     "source": window.get("source", "unknown"),
                     "rejection_reason": window.get("rejection_reason"),
+                    "regression_intercept_kwh": window.get("regression_intercept_kwh"),
                     "regression_r_squared": window.get("regression_r_squared"),
                     "charge_energy_added_kwh": window.get("charge_energy_added_kwh"),
                     "implied_charging_loss_pct": window.get("implied_charging_loss_pct"),
@@ -1988,6 +2051,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         reference = self._battery_reference_capacity(vin)
         return {
             "usable_capacity_kwh": metrics.get("estimated_usable_capacity"),
+            "soc_window_capacity_kwh": metrics.get("soc_window_capacity_kwh"),
+            "bms_energy_offset_kwh": metrics.get("bms_energy_offset_kwh"),
             "original_usable_capacity_kwh": reference if reference > 0 else None,
         }
 
