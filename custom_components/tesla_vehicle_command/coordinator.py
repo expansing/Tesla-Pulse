@@ -391,6 +391,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             tuple[str, str, str], tuple[Any, datetime]
         ] = {}
         self._battery_capacity_models: dict[str, dict[str, Any]] = {}
+        self._battery_history_import_in_progress = False
         self._sleep_timers: dict[str, asyncio.TimerHandle] = {}
 
         super().__init__(
@@ -1232,6 +1233,26 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._finalize_or_discard_window(vin, active)
         model["active_window"] = None
 
+    def _finalize_stale_recorder_window(
+        self, vin: str, reference_time: datetime
+    ) -> bool:
+        """Close a Recorder session after a real silent gap has elapsed."""
+        model = self._battery_capacity_models.get(vin)
+        if not isinstance(model, dict):
+            return False
+        active = model.get("active_window")
+        if not isinstance(active, dict) or active.get("source") != "recorder":
+            return False
+        try:
+            last_time = datetime.fromisoformat(active["last"]["timestamp"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if last_time.tzinfo is None or reference_time - last_time <= _BATTERY_CAPACITY_MAX_SESSION_GAP:
+            return False
+        self._finalize_or_discard_window(vin, active)
+        model["active_window"] = None
+        return True
+
     def reset_battery_capacity_history(self, vin: str, scope: str = "all") -> None:
         """Discard selected persisted estimator evidence for a vehicle."""
         if scope not in {"all", "live", "recorder"}:
@@ -1267,6 +1288,51 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         model["last_reset"] = datetime.now(timezone.utc).isoformat()
         self._telemetry_store.async_delay_save(self._telemetry_store_payload, 30)
         self.async_update_listeners()
+
+    @staticmethod
+    def _in_progress_window_summary(
+        window: Any, latest_sample: Any = None
+    ) -> dict[str, Any] | None:
+        """Return a read-only snapshot of a window that has not closed yet.
+
+        A window can legitimately stay open for a long time (e.g. a
+        Recorder-imported session only closes on a real reversal or a
+        6-hour gap, by design, to avoid fragmenting one continuous session
+        across import batches). Without this, that evidence is invisible
+        in diagnostics until it eventually closes.
+
+        A live window's own "last" is only ever overwritten once, at
+        close (see _new_live_window); latest_sample lets the "current"
+        side of the snapshot reflect the freshest known live sample
+        instead of the stale start-of-window value in the meantime.
+        """
+        if not isinstance(window, dict):
+            return None
+        try:
+            start = window["start"]
+            last = latest_sample if isinstance(latest_sample, dict) else window["last"]
+            start_soc = float(start["soc"])
+            current_soc = float(last["soc"])
+            start_energy = float(start["energy"])
+            current_energy = float(last["energy"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        delta_soc = abs(current_soc - start_soc)
+        capacity_kwh_so_far = (
+            round(abs(current_energy - start_energy) / delta_soc * 100, 3)
+            if delta_soc > 0
+            else None
+        )
+        return {
+            "start_soc": round(start_soc, 3),
+            "current_soc": round(current_soc, 3),
+            "delta_soc_so_far": round(delta_soc, 3),
+            "capacity_kwh_so_far": capacity_kwh_so_far,
+            "direction": window.get("direction"),
+            "source": window.get("source"),
+            "start_time": start.get("timestamp"),
+            "last_update_time": last.get("timestamp"),
+        }
 
     def _finalize_or_discard_window(
         self, vin: str, active: dict[str, Any]
@@ -1698,11 +1764,22 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             source: sum(window.get("source") == source for window in rejected_windows)
             for source in ("live", "recorder")
         }
+        active_window = model.get("active_window")
+        recorder_window_in_progress = (
+            self._in_progress_window_summary(active_window)
+            if isinstance(active_window, dict) and active_window.get("source") == "recorder"
+            else None
+        )
+        live_window_in_progress = self._in_progress_window_summary(
+            model.get("live_window"), model.get("latest_live_sample")
+        )
         if not windows:
             return {
                 "accepted_window_count": 0,
                 "accepted_windows": [],
                 "accepted_window_sources": accepted_source_counts,
+                "recorder_window_in_progress": recorder_window_in_progress,
+                "live_window_in_progress": live_window_in_progress,
                 "implied_soc_zero_reserve_kwh": None,
                 "regression_intercept_sample_count": 0,
                 "regression_intercept_median_kwh": None,
@@ -1835,6 +1912,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "estimate_window_count": len(self._recent_accepted_windows(windows)),
             "accepted_windows": detail,
             "accepted_window_sources": accepted_source_counts,
+            "recorder_window_in_progress": recorder_window_in_progress,
+            "live_window_in_progress": live_window_in_progress,
             "accepted_capacity_min_kwh": round(min(capacities), 3),
             "accepted_capacity_max_kwh": round(max(capacities), 3),
             "high_soc_observation_count": len(high_soc_capacities),
@@ -2033,6 +2112,17 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return now - last_failure_at < _BATTERY_HISTORY_RETRY_INTERVAL
 
     async def async_import_battery_history(self) -> None:
+        """Import Recorder history without overlapping a prior import."""
+        if getattr(self, "_battery_history_import_in_progress", False):
+            _LOGGER.debug("Skipping overlapping battery history import")
+            return
+        self._battery_history_import_in_progress = True
+        try:
+            await self._async_import_battery_history()
+        finally:
+            self._battery_history_import_in_progress = False
+
+    async def _async_import_battery_history(self) -> None:
         """Seed capacity estimates from tightly paired Recorder history states."""
         if "recorder" not in self.hass.config.components:
             return
@@ -2110,27 +2200,6 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             attempted = True
             current_model = self._battery_capacity_models.setdefault(vin, {})
-            if not pairs:
-                current_model["history_import_attempted_at"] = (
-                    end_time.isoformat()
-                )
-                # Nothing new in this range; still a successful, completed
-                # check, so the watermark advances and next restart is not
-                # throttled the way a genuine failure would be.
-                current_model["history_import_completed_at"] = (
-                    end_time.isoformat()
-                )
-                current_model["history_import_last_pair_count"] = 0
-                self._battery_capacity_models[vin] = current_model
-                continue
-
-            # A session in progress at the end of this batch is left open
-            # rather than force-closed, so a later restart's next batch can
-            # continue it; the existing reversal/gap logic in
-            # record_battery_capacity_sample closes it naturally once a real
-            # reversal or a 6-hour gap occurs. Force-closing it here would
-            # fragment one continuous session into multiple sub-20%-span
-            # pieces whenever an import happens to land mid-session.
             for observed_at, soc_percent, energy_remaining_kwh in pairs:
                 self.record_battery_capacity_sample(
                     vin,
@@ -2139,11 +2208,16 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     observed_at,
                     source="recorder",
                 )
-            metrics = self._battery_capacity_metrics(vin)
             imported_model = self._battery_capacity_models.setdefault(vin, {})
             imported_model["history_import_attempted_at"] = end_time.isoformat()
             imported_model["history_import_completed_at"] = end_time.isoformat()
             imported_model["history_import_last_pair_count"] = len(pairs)
+            # Recorder has no explicit charge-stop state. Once the final pair
+            # itself is six hours old, the observed silence is the same
+            # boundary record_battery_capacity_sample already recognizes when
+            # another pair eventually arrives.
+            self._finalize_stale_recorder_window(vin, end_time)
+            metrics = self._battery_capacity_metrics(vin)
             if not metrics:
                 continue
 
