@@ -1764,8 +1764,11 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             source: sum(window.get("source") == source for window in rejected_windows)
             for source in ("live", "recorder")
         }
-        recorder_window_in_progress = self._in_progress_window_summary(
-            model.get("active_window")
+        active_window = model.get("active_window")
+        recorder_window_in_progress = (
+            self._in_progress_window_summary(active_window)
+            if isinstance(active_window, dict) and active_window.get("source") == "recorder"
+            else None
         )
         live_window_in_progress = self._in_progress_window_summary(
             model.get("live_window"), model.get("latest_live_sample")
