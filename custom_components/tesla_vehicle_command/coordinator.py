@@ -1268,6 +1268,51 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._telemetry_store.async_delay_save(self._telemetry_store_payload, 30)
         self.async_update_listeners()
 
+    @staticmethod
+    def _in_progress_window_summary(
+        window: Any, latest_sample: Any = None
+    ) -> dict[str, Any] | None:
+        """Return a read-only snapshot of a window that has not closed yet.
+
+        A window can legitimately stay open for a long time (e.g. a
+        Recorder-imported session only closes on a real reversal or a
+        6-hour gap, by design, to avoid fragmenting one continuous session
+        across import batches). Without this, that evidence is invisible
+        in diagnostics until it eventually closes.
+
+        A live window's own "last" is only ever overwritten once, at
+        close (see _new_live_window); latest_sample lets the "current"
+        side of the snapshot reflect the freshest known live sample
+        instead of the stale start-of-window value in the meantime.
+        """
+        if not isinstance(window, dict):
+            return None
+        try:
+            start = window["start"]
+            last = latest_sample if isinstance(latest_sample, dict) else window["last"]
+            start_soc = float(start["soc"])
+            current_soc = float(last["soc"])
+            start_energy = float(start["energy"])
+            current_energy = float(last["energy"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        delta_soc = abs(current_soc - start_soc)
+        capacity_kwh_so_far = (
+            round(abs(current_energy - start_energy) / delta_soc * 100, 3)
+            if delta_soc > 0
+            else None
+        )
+        return {
+            "start_soc": round(start_soc, 3),
+            "current_soc": round(current_soc, 3),
+            "delta_soc_so_far": round(delta_soc, 3),
+            "capacity_kwh_so_far": capacity_kwh_so_far,
+            "direction": window.get("direction"),
+            "source": window.get("source"),
+            "start_time": start.get("timestamp"),
+            "last_update_time": last.get("timestamp"),
+        }
+
     def _finalize_or_discard_window(
         self, vin: str, active: dict[str, Any]
     ) -> None:
@@ -1698,11 +1743,19 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             source: sum(window.get("source") == source for window in rejected_windows)
             for source in ("live", "recorder")
         }
+        recorder_window_in_progress = self._in_progress_window_summary(
+            model.get("active_window")
+        )
+        live_window_in_progress = self._in_progress_window_summary(
+            model.get("live_window"), model.get("latest_live_sample")
+        )
         if not windows:
             return {
                 "accepted_window_count": 0,
                 "accepted_windows": [],
                 "accepted_window_sources": accepted_source_counts,
+                "recorder_window_in_progress": recorder_window_in_progress,
+                "live_window_in_progress": live_window_in_progress,
                 "implied_soc_zero_reserve_kwh": None,
                 "regression_intercept_sample_count": 0,
                 "regression_intercept_median_kwh": None,
@@ -1835,6 +1888,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "estimate_window_count": len(self._recent_accepted_windows(windows)),
             "accepted_windows": detail,
             "accepted_window_sources": accepted_source_counts,
+            "recorder_window_in_progress": recorder_window_in_progress,
+            "live_window_in_progress": live_window_in_progress,
             "accepted_capacity_min_kwh": round(min(capacities), 3),
             "accepted_capacity_max_kwh": round(max(capacities), 3),
             "high_soc_observation_count": len(high_soc_capacities),
