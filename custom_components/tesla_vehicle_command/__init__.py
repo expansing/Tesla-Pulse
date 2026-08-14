@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -10,6 +11,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.event import async_track_time_interval
 import voluptuous as vol
 
 from .const import CONF_WAKE_ON_STARTUP, DOMAIN
@@ -29,6 +31,7 @@ PLATFORMS: list[Platform] = [
 ]
 
 _LOGGER = logging.getLogger(__name__)
+_BATTERY_HISTORY_IMPORT_INTERVAL = timedelta(minutes=15)
 
 # Service schemas
 SERVICE_SET_VALET_MODE_SCHEMA = vol.Schema({
@@ -116,6 +119,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass,
         coordinator.async_import_battery_history(),
         "import Tesla Pulse battery history",
+    )
+
+    async def async_import_battery_history_periodically(_: datetime) -> None:
+        """Catch up Recorder evidence and close sessions after a silent gap."""
+        await coordinator.async_import_battery_history()
+
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            async_import_battery_history_periodically,
+            _BATTERY_HISTORY_IMPORT_INTERVAL,
+        )
     )
 
     # Register services

@@ -1021,6 +1021,91 @@ def test_recorder_long_gap_closes_the_previous_window(
     assert coordinator._battery_capacity_models[VIN]["active_window"]["start"]["soc"] == 76.0
 
 
+def test_recorder_import_finalizes_a_completed_window_after_silent_gap(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A finished charge is scored even when no later state change arrives.
+
+    Recorder stops emitting significant battery states once charging ends.
+    The importer must therefore use elapsed silence as the same real gap
+    boundary it otherwise only sees when a later pair finally arrives.
+    """
+    coordinator.record_battery_capacity_sample(
+        VIN, 54, 36.0, observed_at=START, source="recorder"
+    )
+    last_sample_time = START + timedelta(hours=2)
+    coordinator.record_battery_capacity_sample(
+        VIN, 80, 52.34, observed_at=last_sample_time, source="recorder"
+    )
+
+    finalized = coordinator._finalize_stale_recorder_window(
+        VIN, last_sample_time + timedelta(hours=6, seconds=1)
+    )
+
+    model = coordinator._battery_capacity_models[VIN]
+    assert finalized is True
+    assert model["active_window"] is None
+    assert model["accepted_windows"][0]["capacity_kwh"] == pytest.approx(62.846)
+
+
+def test_recorder_import_keeps_a_window_open_before_the_silent_gap(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A recent Recorder session remains open rather than being fragmented."""
+    coordinator.record_battery_capacity_sample(
+        VIN, 54, 36.0, observed_at=START, source="recorder"
+    )
+    last_sample_time = START + timedelta(hours=2)
+    coordinator.record_battery_capacity_sample(
+        VIN, 80, 52.34, observed_at=last_sample_time, source="recorder"
+    )
+
+    finalized = coordinator._finalize_stale_recorder_window(
+        VIN, last_sample_time + timedelta(hours=5, minutes=59)
+    )
+
+    assert finalized is False
+    assert coordinator._battery_capacity_models[VIN]["active_window"] is not None
+
+
+def test_recorder_import_stale_finalizer_does_not_touch_non_recorder_windows(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """The Recorder finalizer cannot close a different source's active window."""
+    coordinator._battery_capacity_models[VIN] = {
+        "active_window": {
+            "source": "live",
+            "last": {"timestamp": START.isoformat()},
+        }
+    }
+
+    finalized = coordinator._finalize_stale_recorder_window(
+        VIN, START + timedelta(days=1)
+    )
+
+    assert finalized is False
+    assert coordinator._battery_capacity_models[VIN]["active_window"]["source"] == "live"
+
+
+def test_recorder_import_stale_finalizer_ignores_malformed_timestamp(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """Corrupt persisted state cannot crash or spuriously close a window."""
+    coordinator._battery_capacity_models[VIN] = {
+        "active_window": {
+            "source": "recorder",
+            "last": {"timestamp": "not-a-timestamp"},
+        }
+    }
+
+    finalized = coordinator._finalize_stale_recorder_window(
+        VIN, START + timedelta(days=1)
+    )
+
+    assert finalized is False
+    assert coordinator._battery_capacity_models[VIN]["active_window"] is not None
+
+
 def test_recorder_import_batches_do_not_fragment_an_in_progress_session(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
@@ -1453,6 +1538,35 @@ def test_history_import_throttle_ignores_a_never_attempted_model(
 ) -> None:
     """A vehicle with no import history yet is never throttled."""
     assert coordinator._history_import_is_throttled({}, START) is False
+
+
+def test_battery_history_import_skips_an_overlapping_run(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """The setup and periodic import cannot race Recorder window state."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def slow_import() -> None:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+
+    coordinator._async_import_battery_history = slow_import
+
+    async def run_imports() -> None:
+        first_import = asyncio.create_task(coordinator.async_import_battery_history())
+        await started.wait()
+        await coordinator.async_import_battery_history()
+        release.set()
+        await first_import
+
+    asyncio.run(run_imports())
+
+    assert calls == 1
+    assert coordinator._battery_history_import_in_progress is False
 
 
 def test_telemetry_status_reports_specific_health_reasons(

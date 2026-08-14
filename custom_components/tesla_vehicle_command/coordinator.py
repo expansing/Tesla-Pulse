@@ -391,6 +391,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             tuple[str, str, str], tuple[Any, datetime]
         ] = {}
         self._battery_capacity_models: dict[str, dict[str, Any]] = {}
+        self._battery_history_import_in_progress = False
         self._sleep_timers: dict[str, asyncio.TimerHandle] = {}
 
         super().__init__(
@@ -1231,6 +1232,26 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if isinstance(active, dict):
             self._finalize_or_discard_window(vin, active)
         model["active_window"] = None
+
+    def _finalize_stale_recorder_window(
+        self, vin: str, reference_time: datetime
+    ) -> bool:
+        """Close a Recorder session after a real silent gap has elapsed."""
+        model = self._battery_capacity_models.get(vin)
+        if not isinstance(model, dict):
+            return False
+        active = model.get("active_window")
+        if not isinstance(active, dict) or active.get("source") != "recorder":
+            return False
+        try:
+            last_time = datetime.fromisoformat(active["last"]["timestamp"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if last_time.tzinfo is None or reference_time - last_time <= _BATTERY_CAPACITY_MAX_SESSION_GAP:
+            return False
+        self._finalize_or_discard_window(vin, active)
+        model["active_window"] = None
+        return True
 
     def reset_battery_capacity_history(self, vin: str, scope: str = "all") -> None:
         """Discard selected persisted estimator evidence for a vehicle."""
@@ -2088,6 +2109,17 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return now - last_failure_at < _BATTERY_HISTORY_RETRY_INTERVAL
 
     async def async_import_battery_history(self) -> None:
+        """Import Recorder history without overlapping a prior import."""
+        if getattr(self, "_battery_history_import_in_progress", False):
+            _LOGGER.debug("Skipping overlapping battery history import")
+            return
+        self._battery_history_import_in_progress = True
+        try:
+            await self._async_import_battery_history()
+        finally:
+            self._battery_history_import_in_progress = False
+
+    async def _async_import_battery_history(self) -> None:
         """Seed capacity estimates from tightly paired Recorder history states."""
         if "recorder" not in self.hass.config.components:
             return
@@ -2165,27 +2197,6 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             attempted = True
             current_model = self._battery_capacity_models.setdefault(vin, {})
-            if not pairs:
-                current_model["history_import_attempted_at"] = (
-                    end_time.isoformat()
-                )
-                # Nothing new in this range; still a successful, completed
-                # check, so the watermark advances and next restart is not
-                # throttled the way a genuine failure would be.
-                current_model["history_import_completed_at"] = (
-                    end_time.isoformat()
-                )
-                current_model["history_import_last_pair_count"] = 0
-                self._battery_capacity_models[vin] = current_model
-                continue
-
-            # A session in progress at the end of this batch is left open
-            # rather than force-closed, so a later restart's next batch can
-            # continue it; the existing reversal/gap logic in
-            # record_battery_capacity_sample closes it naturally once a real
-            # reversal or a 6-hour gap occurs. Force-closing it here would
-            # fragment one continuous session into multiple sub-20%-span
-            # pieces whenever an import happens to land mid-session.
             for observed_at, soc_percent, energy_remaining_kwh in pairs:
                 self.record_battery_capacity_sample(
                     vin,
@@ -2194,11 +2205,16 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     observed_at,
                     source="recorder",
                 )
-            metrics = self._battery_capacity_metrics(vin)
             imported_model = self._battery_capacity_models.setdefault(vin, {})
             imported_model["history_import_attempted_at"] = end_time.isoformat()
             imported_model["history_import_completed_at"] = end_time.isoformat()
             imported_model["history_import_last_pair_count"] = len(pairs)
+            # Recorder has no explicit charge-stop state. Once the final pair
+            # itself is six hours old, the observed silence is the same
+            # boundary record_battery_capacity_sample already recognizes when
+            # another pair eventually arrives.
+            self._finalize_stale_recorder_window(vin, end_time)
+            metrics = self._battery_capacity_metrics(vin)
             if not metrics:
                 continue
 
