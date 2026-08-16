@@ -1278,6 +1278,13 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if isinstance(window, dict) and window.get("source") != scope
                 ]
 
+        # These are derived summaries of the accepted evidence; they must be
+        # rebuilt whenever the underlying windows are reset to avoid stale
+        # capacity values persisting across a recalculation.
+        for key in ("daily_snapshots", "high_soc_observations"):
+            if scope == "all" or key in model:
+                model[key] = []
+
         active = model.get("active_window")
         if scope == "all" or (
             isinstance(active, dict) and active.get("source") == scope
