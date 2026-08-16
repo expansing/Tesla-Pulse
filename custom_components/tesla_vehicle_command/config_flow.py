@@ -622,7 +622,7 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                 )
             )
             schema_fields[
-                vol.Optional(
+                vol.Required(
                     CONF_BATTERY_MIN_SOC_SPAN,
                     default=current_min_soc_span,
                 )
@@ -703,7 +703,7 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                         mode=selector.NumberSelectorMode.BOX,
                     )
                 ),
-                vol.Optional(
+                vol.Required(
                     CONF_BATTERY_MIN_SOC_SPAN,
                     default=current_min_soc_span,
                 ): selector.NumberSelector(
