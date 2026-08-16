@@ -190,12 +190,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ValueError("Vehicle is not configured by Tesla Pulse")
 
     async def handle_reset_battery_history(call: ServiceCall) -> None:
-        """Discard the selected persisted SOH estimator evidence."""
+        """Discard persisted SOH estimator evidence without rebuilding it."""
         coordinator = coordinator_for_vin(call.data["vin"])
         scope = call.data["scope"]
         coordinator.reset_battery_capacity_history(call.data["vin"], scope)
-        if scope in ("all", "recorder"):
-            await coordinator.async_import_battery_history()
+
+    async def handle_rebuild_battery_history(call: ServiceCall) -> None:
+        """Rebuild the estimator from recent Recorder history for a vehicle."""
+        coordinator = coordinator_for_vin(call.data["vin"])
+        await coordinator.async_import_battery_history()
 
     async def handle_rescan_capabilities(call: ServiceCall) -> None:
         """Clear capability conclusions and start a new observation run."""
@@ -220,6 +223,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN,
         "reset_battery_history",
         handle_reset_battery_history,
+        schema=SERVICE_RESET_BATTERY_HISTORY_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "rebuild_battery_history",
+        handle_rebuild_battery_history,
         schema=SERVICE_RESET_BATTERY_HISTORY_SCHEMA,
     )
     hass.services.async_register(
