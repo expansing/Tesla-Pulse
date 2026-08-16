@@ -53,7 +53,8 @@
           "telemetry_port": "Fleet Telemetry port",
           "wake_on_startup": "Wake vehicle and refresh from API on startup",
           "battery_reference_capacity_kwh": "Original usable capacity",
-          "battery_reference_capacity_preset": "Capacity preset (approximate)"
+          "battery_reference_capacity_preset": "Capacity preset (approximate)",
+          "battery_min_soc_span": "Minimum accepted battery window (%)"
         },
         "data_description": {
           "update_interval": "Seconds between fallback vehicle-data requests. Short intervals can keep the vehicle awake and increase Fleet API traffic.",
@@ -62,7 +63,8 @@
           "telemetry_port": "Public TCP port for the Fleet Telemetry receiver.",
           "wake_on_startup": "When enabled, wakes each vehicle and refreshes its state through the Fleet API after Home Assistant starts. When disabled, the last cached telemetry state is restored and the vehicle remains asleep until telemetry arrives.",
           "battery_reference_capacity_kwh": "Original usable pack capacity in kWh. Leave blank to hide SOH while retaining capacity estimates.",
-          "battery_reference_capacity_preset": "Optional approximate starting value by model. A value entered above always overrides the preset; presets are not authoritative."
+          "battery_reference_capacity_preset": "Optional approximate starting value by model. A value entered above always overrides the preset; presets are not authoritative.",
+          "battery_min_soc_span": "Ignore estimate windows smaller than this SOC change percentage. Raise it if you want to require a larger charge/discharge span before accepting a battery-capacity sample."
         }
       },
       "battery": {
@@ -70,11 +72,13 @@
         "description": "Enter the usable battery capacity when new for {vehicle_name} ({vin}). Leave blank to disable the SOH percentage while still estimating current usable capacity.",
         "data": {
           "battery_reference_capacity_kwh": "Usable battery capacity when new",
-          "battery_reference_capacity_preset": "Capacity preset (approximate)"
+          "battery_reference_capacity_preset": "Capacity preset (approximate)",
+          "battery_min_soc_span": "Minimum accepted battery window (%)"
         },
         "data_description": {
           "battery_reference_capacity_kwh": "The pack's original usable capacity in kWh, excluding inaccessible buffers. This is a user-provided reference, not nominal nameplate capacity.",
-          "battery_reference_capacity_preset": "Optional approximate starting value by model. A value entered above always overrides the preset; presets are not authoritative."
+          "battery_reference_capacity_preset": "Optional approximate starting value by model. A value entered above always overrides the preset; presets are not authoritative.",
+          "battery_min_soc_span": "Use the smallest charge or discharge SOC span that should be accepted as a capacity estimate. Smaller windows are ignored, larger windows can still be filtered by fit quality and outlier checks."
         }
       }
     }
@@ -208,10 +212,17 @@
     },
     "reset_battery_history": {
       "name": "Reset Battery Estimator History",
-      "description": "Permanently discard selected accepted and rejected battery estimator windows for a vehicle.",
+      "description": "Permanently discard selected accepted and rejected battery estimator windows for a vehicle without re-importing historical data.",
       "fields": {
         "vin": { "name": "Vehicle VIN", "description": "VIN of the vehicle whose estimator history will be reset." },
         "scope": { "name": "Evidence Source", "description": "Choose all estimator evidence, only live telemetry windows, or only Recorder-imported windows." }
+      }
+    },
+    "rebuild_battery_history": {
+      "name": "Rebuild Battery Estimator History",
+      "description": "Pull recent Recorder history back into the battery estimator for a vehicle after a reset or to refresh the estimate from stored data.",
+      "fields": {
+        "vin": { "name": "Vehicle VIN", "description": "VIN of the vehicle whose battery estimator history will be rebuilt." }
       }
     },
     "rescan_capabilities": {
