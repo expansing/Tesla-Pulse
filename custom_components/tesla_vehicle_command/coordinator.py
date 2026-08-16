@@ -1775,7 +1775,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if estimate is None:
             return {}
         soc_window_capacity = float(estimate)
-        intercept, _, intercept_stable = self._stable_regression_intercept(windows)
+        intercept, _, intercept_stable = self._stable_regression_intercept(
+            recent_windows
+        )
         displayed_slope = round(soc_window_capacity, 3)
         displayed_offset = round(intercept, 3) if intercept_stable else None
         estimated_capacity = round(
@@ -1892,15 +1894,15 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ],
             }
 
-        capacities = [float(window["capacity_kwh"]) for window in windows]
-        estimate = self._weighted_average_capacity(self._recent_accepted_windows(windows))
+        capacities = [float(window["capacity_kwh"]) for window in recent_windows]
+        estimate = self._weighted_average_capacity(recent_windows)
         intercepts = [
             float(window["regression_intercept_kwh"])
-            for window in windows
+            for window in recent_windows
             if self._is_finite_number(window.get("regression_intercept_kwh"))
         ]
         intercept_median, intercept_mad, intercept_stable = (
-            self._stable_regression_intercept(windows)
+            self._stable_regression_intercept(recent_windows)
         )
         displayed_slope = round(float(estimate), 3) if estimate is not None else None
         displayed_offset = round(intercept_median, 3) if intercept_stable else None
