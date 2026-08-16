@@ -1894,6 +1894,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ],
             }
 
+        recent_windows = self._recent_accepted_windows(windows)
         capacities = [float(window["capacity_kwh"]) for window in recent_windows]
         estimate = self._weighted_average_capacity(recent_windows)
         intercepts = [
