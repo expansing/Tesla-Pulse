@@ -25,10 +25,12 @@ from .const import (
     API_WAKE_UP,
     COMMAND_BODIES,
     COMMANDS,
+    CONF_BATTERY_MIN_SOC_SPANS,
     CONF_BATTERY_REFERENCE_CAPACITIES,
     CONF_TELEMETRY_HOSTNAME,
     CONF_TELEMETRY_INACTIVITY_MINUTES,
     CONF_TELEMETRY_PORT,
+    DEFAULT_BATTERY_MIN_SOC_SPAN,
     CONF_TELEMETRY_REGISTRATION_REQUIRED_VINS,
     DEFAULT_TELEMETRY_INACTIVITY_MINUTES,
     DOMAIN,
@@ -278,7 +280,7 @@ _FLEET_TELEMETRY_FIELDS = {
 
 _TELEMETRY_STORE_VERSION = 2
 _COMMAND_STATE_CONFIRMATION_TIMEOUT = timedelta(seconds=30)
-_BATTERY_CAPACITY_MIN_SOC_SPAN = 20.0
+_BATTERY_CAPACITY_MIN_SOC_SPAN = DEFAULT_BATTERY_MIN_SOC_SPAN
 _BATTERY_CAPACITY_MAX_SESSION_GAP = timedelta(hours=6)
 _BATTERY_WINDOW_ANCHOR_MAX_AGE = timedelta(minutes=15)
 _BATTERY_CAPACITY_MIN_KWH = 10.0
@@ -1278,6 +1280,13 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if isinstance(window, dict) and window.get("source") != scope
                 ]
 
+        # These are derived summaries of the accepted evidence; they must be
+        # rebuilt whenever the underlying windows are reset to avoid stale
+        # capacity values persisting across a recalculation.
+        for key in ("daily_snapshots", "high_soc_observations"):
+            if scope == "all" or key in model:
+                model[key] = []
+
         active = model.get("active_window")
         if scope == "all" or (
             isinstance(active, dict) and active.get("source") == scope
@@ -1360,7 +1369,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         delta_soc = abs(end_soc - start_soc)
-        if delta_soc < _BATTERY_CAPACITY_MIN_SOC_SPAN:
+        if delta_soc < self._battery_min_soc_span(vin):
             return  # Not enough span; drop silently.
 
         delta_energy = abs(end_energy - start_energy)
@@ -1512,12 +1521,20 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @classmethod
     def _valid_accepted_windows(
-        cls, model: dict[str, Any]
+        cls,
+        model: dict[str, Any],
+        vin: str | None = None,
+        min_soc_span: float | None = None,
     ) -> list[dict[str, Any]]:
         """Return non-rejected accepted windows that pass sanity bounds."""
         windows = model.get("accepted_windows")
         if not isinstance(windows, list):
             return []
+        threshold = (
+            float(min_soc_span)
+            if cls._is_finite_number(min_soc_span)
+            else _BATTERY_CAPACITY_MIN_SOC_SPAN
+        )
         valid: list[dict[str, Any]] = []
         for window in windows:
             if not isinstance(window, dict) or window.get("rejected"):
@@ -1528,7 +1545,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cls._is_finite_number(capacity)
                 and _BATTERY_CAPACITY_MIN_KWH <= capacity <= _BATTERY_CAPACITY_MAX_KWH
                 and cls._is_finite_number(delta_soc)
-                and _BATTERY_CAPACITY_MIN_SOC_SPAN <= delta_soc <= 100
+                and threshold <= float(delta_soc) <= 100
             ):
                 valid.append(window)
         return valid
@@ -1737,10 +1754,20 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return float(reference)
         return 0.0
 
+    def _battery_min_soc_span(self, vin: str) -> float:
+        """Return the configured minimum SOC span for a vehicle window."""
+        min_soc_spans = self.entry.options.get(CONF_BATTERY_MIN_SOC_SPANS, {})
+        threshold = min_soc_spans.get(vin) if isinstance(min_soc_spans, dict) else None
+        if self._is_finite_number(threshold):
+            return float(threshold)
+        return _BATTERY_CAPACITY_MIN_SOC_SPAN
+
     def _battery_capacity_metrics(self, vin: str) -> dict[str, Any]:
         """Return capacity, SOH, and confidence from the most recent sessions."""
         model = self._battery_capacity_models.get(vin, {})
-        windows = self._valid_accepted_windows(model)
+        windows = self._valid_accepted_windows(
+            model, vin, self._battery_min_soc_span(vin)
+        )
         if not windows:
             return {}
         recent_windows = self._recent_accepted_windows(windows)
@@ -1802,7 +1829,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def get_battery_capacity_diagnostics(self, vin: str) -> dict[str, Any]:
         """Return accepted capacity windows and data-quality indicators."""
         model = self._battery_capacity_models.get(vin, {})
-        windows = self._valid_accepted_windows(model)
+        windows = self._valid_accepted_windows(
+            model, vin, self._battery_min_soc_span(vin)
+        )
         rejected = model.get("rejected_windows")
         rejected_windows = [
             window for window in rejected if isinstance(window, dict)
@@ -2059,7 +2088,9 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def get_battery_confidence_diagnostics(self, vin: str) -> dict[str, Any]:
         """Return the recent-session SOC coverage backing SOH Confidence."""
         model = self._battery_capacity_models.get(vin, {})
-        windows = self._valid_accepted_windows(model)
+        windows = self._valid_accepted_windows(
+            model, vin, self._battery_min_soc_span(vin)
+        )
         recent_windows = self._recent_accepted_windows(windows)
         recent_span = round(
             min(100.0, sum(float(window["delta_soc"]) for window in recent_windows)),

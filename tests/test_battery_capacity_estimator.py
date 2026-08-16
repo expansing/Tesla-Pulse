@@ -1368,6 +1368,23 @@ def test_live_reset_preserves_recorder_import_checkpoint(
     assert coordinator._battery_capacity_models[VIN]["history_import_completed_at"] == START.isoformat()
 
 
+def test_reset_battery_history_discards_stale_derived_evidence(
+    coordinator: TeslaVehicleCommandCoordinator,
+) -> None:
+    """A full reset must clear cached snapshots and high-SOC observations."""
+    coordinator._battery_capacity_models[VIN] = {
+        "accepted_windows": [{"source": "recorder", "capacity_kwh": 61.0, "delta_soc": 20.0}],
+        "daily_snapshots": [{"date": "2026-08-16", "usable_capacity_kwh": 84.1}],
+        "high_soc_observations": [{"soc": 98.0, "energy": 64.2, "capacity_kwh": 65.5}],
+    }
+
+    coordinator.reset_battery_capacity_history(VIN, "all")
+
+    model = coordinator._battery_capacity_models[VIN]
+    assert model["daily_snapshots"] == []
+    assert model["high_soc_observations"] == []
+
+
 def test_reset_battery_history_discards_invalid_window_entries(
     coordinator: TeslaVehicleCommandCoordinator,
 ) -> None:
