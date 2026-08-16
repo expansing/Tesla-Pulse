@@ -305,7 +305,7 @@ _BATTERY_INTERCEPT_STABILITY_MIN_COUNT = 9
 _BATTERY_INTERCEPT_STABILITY_MAD_PCT = 1.5
 _TELEMETRY_DIAGNOSTIC_COUNTER_MAX = 10_000
 _BATTERY_HISTORY_LOOKBACK = timedelta(days=30)
-_BATTERY_HISTORY_PAIR_TOLERANCE = timedelta(seconds=2)
+_BATTERY_HISTORY_PAIR_TOLERANCE = timedelta(seconds=30)
 _BATTERY_HISTORY_RETRY_INTERVAL = timedelta(days=1)
 _COMMAND_STATE_SIGNALS = {
     ("charge_state", "charge_limit_soc"): "ChargeLimitSoc",
@@ -1776,7 +1776,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return {}
         soc_window_capacity = float(estimate)
         intercept, _, intercept_stable = self._stable_regression_intercept(
-            recent_windows
+            windows
         )
         displayed_slope = round(soc_window_capacity, 3)
         displayed_offset = round(intercept, 3) if intercept_stable else None
