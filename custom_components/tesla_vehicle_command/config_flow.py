@@ -23,6 +23,8 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
 from .const import (
     BATTERY_CAPACITY_PRESET_CUSTOM,
     BATTERY_CAPACITY_PRESETS,
+    CONF_BATTERY_MIN_SOC_SPAN,
+    CONF_BATTERY_MIN_SOC_SPANS,
     CONF_BATTERY_REFERENCE_CAPACITIES,
     CONF_BATTERY_REFERENCE_CAPACITY_KWH,
     CONF_BATTERY_REFERENCE_CAPACITY_PRESET,
@@ -38,13 +40,16 @@ from .const import (
     CONF_VIN,
     CONF_NAME,
     CONF_PRIVATE_KEY_PATH,
+    DEFAULT_BATTERY_MIN_SOC_SPAN,
     DOMAIN,
     FLEET_API_BASE_URL_EU,
     FLEET_API_BASE_URL_NA,
     DEFAULT_TELEMETRY_PORT,
     DEFAULT_TELEMETRY_INACTIVITY_MINUTES,
+    MAX_BATTERY_MIN_SOC_SPAN,
     MAX_TELEMETRY_PORT,
     MAX_TELEMETRY_INACTIVITY_MINUTES,
+    MIN_BATTERY_MIN_SOC_SPAN,
     MIN_TELEMETRY_PORT,
     MIN_TELEMETRY_INACTIVITY_MINUTES,
     OAUTH2_AUTHORIZE,
@@ -447,6 +452,7 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
         super().__init__()
         self._pending_options: dict[str, Any] = {}
         self._battery_references: dict[str, float] = {}
+        self._battery_min_soc_spans: dict[str, float] = {}
         self._battery_vehicle_index = 0
 
     @staticmethod
@@ -487,6 +493,9 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
             submitted_preset = submitted_options.pop(
                 CONF_BATTERY_REFERENCE_CAPACITY_PRESET, None
             )
+            submitted_min_soc_span = submitted_options.pop(
+                CONF_BATTERY_MIN_SOC_SPAN, None
+            )
             self._pending_options = {
                 **self.config_entry.options,
                 **submitted_options,
@@ -507,6 +516,10 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
             self._battery_references = (
                 dict(references) if isinstance(references, dict) else {}
             )
+            min_soc_spans = self.config_entry.options.get(CONF_BATTERY_MIN_SOC_SPANS, {})
+            self._battery_min_soc_spans = (
+                dict(min_soc_spans) if isinstance(min_soc_spans, dict) else {}
+            )
             self._battery_vehicle_index = 0
             vehicles = self.config_entry.data.get(CONF_VEHICLES, [])
             if len(vehicles) == 1:
@@ -518,8 +531,15 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                     self._battery_references.pop(vin, None)
                 else:
                     self._battery_references[vin] = resolved
+                if submitted_min_soc_span is None:
+                    self._battery_min_soc_spans.pop(vin, None)
+                else:
+                    self._battery_min_soc_spans[vin] = float(submitted_min_soc_span)
                 self._pending_options[CONF_BATTERY_REFERENCE_CAPACITIES] = (
                     self._battery_references
+                )
+                self._pending_options[CONF_BATTERY_MIN_SOC_SPANS] = (
+                    self._battery_min_soc_spans
                 )
                 return self.async_create_entry(
                     title="", data=self._pending_options
@@ -537,6 +557,7 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
             CONF_TELEMETRY_PORT, DEFAULT_TELEMETRY_PORT
         )
         wake_on_startup = self.config_entry.options.get(CONF_WAKE_ON_STARTUP, False)
+        min_soc_spans = self.config_entry.options.get(CONF_BATTERY_MIN_SOC_SPANS, {})
         schema_fields: dict[Any, Any] = {
             vol.Optional(
                 CONF_TELEMETRY_HOSTNAME, default=telemetry_hostname
@@ -576,6 +597,11 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                 if isinstance(references, dict)
                 else None
             )
+            current_min_soc_span = (
+                min_soc_spans.get(vehicles[0][CONF_VIN])
+                if isinstance(min_soc_spans, dict)
+                else DEFAULT_BATTERY_MIN_SOC_SPAN
+            )
             marker_options = (
                 {"description": {"suggested_value": current_capacity}}
                 if current_capacity is not None
@@ -592,6 +618,20 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                     max=200,
                     step=0.1,
                     unit_of_measurement="kWh",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+            schema_fields[
+                vol.Optional(
+                    CONF_BATTERY_MIN_SOC_SPAN,
+                    default=current_min_soc_span,
+                )
+            ] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=MIN_BATTERY_MIN_SOC_SPAN,
+                    max=MAX_BATTERY_MIN_SOC_SPAN,
+                    step=1,
+                    unit_of_measurement="%",
                     mode=selector.NumberSelectorMode.BOX,
                 )
             )
@@ -615,6 +655,9 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
             self._pending_options[CONF_BATTERY_REFERENCE_CAPACITIES] = (
                 self._battery_references
             )
+            self._pending_options[CONF_BATTERY_MIN_SOC_SPANS] = (
+                self._battery_min_soc_spans
+            )
             return self.async_create_entry(title="", data=self._pending_options)
 
         vehicle = vehicles[self._battery_vehicle_index]
@@ -629,10 +672,18 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                 self._battery_references.pop(vin, None)
             else:
                 self._battery_references[vin] = resolved
+            min_soc_span = user_input.get(CONF_BATTERY_MIN_SOC_SPAN)
+            if min_soc_span is None:
+                self._battery_min_soc_spans.pop(vin, None)
+            else:
+                self._battery_min_soc_spans[vin] = float(min_soc_span)
             self._battery_vehicle_index += 1
             return await self.async_step_battery()
 
         current_capacity = self._battery_references.get(vin)
+        current_min_soc_span = self._battery_min_soc_spans.get(
+            vin, DEFAULT_BATTERY_MIN_SOC_SPAN
+        )
         marker_options = (
             {"description": {"suggested_value": current_capacity}}
             if current_capacity is not None
@@ -649,6 +700,18 @@ class TeslaVehicleCommandOptionsFlow(config_entries.OptionsFlow):
                         max=200,
                         step=0.1,
                         unit_of_measurement="kWh",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Optional(
+                    CONF_BATTERY_MIN_SOC_SPAN,
+                    default=current_min_soc_span,
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=MIN_BATTERY_MIN_SOC_SPAN,
+                        max=MAX_BATTERY_MIN_SOC_SPAN,
+                        step=1,
+                        unit_of_measurement="%",
                         mode=selector.NumberSelectorMode.BOX,
                     )
                 ),

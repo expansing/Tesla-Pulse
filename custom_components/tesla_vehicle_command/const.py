@@ -34,7 +34,13 @@ CONF_WAKE_ON_STARTUP = "wake_on_startup"
 CONF_BATTERY_REFERENCE_CAPACITIES = "battery_reference_capacities"
 CONF_BATTERY_REFERENCE_CAPACITY_KWH = "battery_reference_capacity_kwh"
 CONF_BATTERY_REFERENCE_CAPACITY_PRESET = "battery_reference_capacity_preset"
+CONF_BATTERY_MIN_SOC_SPANS = "battery_min_soc_spans"
+CONF_BATTERY_MIN_SOC_SPAN = "battery_min_soc_span"
 OPT_OPTIONAL_POWERTRAIN_SENSORS_MIGRATED = "optional_powertrain_sensors_migrated"
+
+DEFAULT_BATTERY_MIN_SOC_SPAN = 20.0
+MIN_BATTERY_MIN_SOC_SPAN = 0.0
+MAX_BATTERY_MIN_SOC_SPAN = 100.0
 
 # Approximate usable-when-new capacities (kWh) by common Tesla configuration.
 # These are non-authoritative suggestions only: usable capacity varies by
