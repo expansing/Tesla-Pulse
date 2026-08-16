@@ -62,6 +62,10 @@ SERVICE_RESET_BATTERY_HISTORY_SCHEMA = vol.Schema({
     vol.Required("scope"): vol.In(["all", "live", "recorder"]),
 })
 
+SERVICE_REBUILD_BATTERY_HISTORY_SCHEMA = vol.Schema({
+    vol.Required("vin"): cv.string,
+})
+
 SERVICE_RESCAN_CAPABILITIES_SCHEMA = vol.Schema({
     vol.Required("vin"): cv.string,
 })
@@ -199,6 +203,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Rebuild the estimator from recent Recorder history for a vehicle."""
         coordinator = coordinator_for_vin(call.data["vin"])
         await coordinator.async_import_battery_history()
+        _LOGGER.info("Battery estimator history rebuilt for vehicle %s", call.data["vin"])
 
     async def handle_rescan_capabilities(call: ServiceCall) -> None:
         """Clear capability conclusions and start a new observation run."""
@@ -229,7 +234,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN,
         "rebuild_battery_history",
         handle_rebuild_battery_history,
-        schema=SERVICE_RESET_BATTERY_HISTORY_SCHEMA,
+        schema=SERVICE_REBUILD_BATTERY_HISTORY_SCHEMA,
     )
     hass.services.async_register(
         DOMAIN,
