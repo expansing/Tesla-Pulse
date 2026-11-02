@@ -43,10 +43,13 @@ class _Coordinator:
         self.data = {VIN: {"response": {"charge_state": charge}}}
         self.sent: list[str] = []
         self.refreshed = 0
+        self.fail = None
 
     async def async_send_command(self, vin: str, command: str, body=None):
         assert vin == VIN
         self.sent.append(command)
+        if self.fail:
+            raise RuntimeError(f"Command failed: car could not execute command: {self.fail}")
         return {}
 
     async def async_request_refresh(self) -> None:
@@ -98,3 +101,30 @@ def test_charge_commands_do_not_fake_the_charging_state():
 
     for command in ("charge_start", "charge_stop"):
         assert TeslaVehicleCommandCoordinator._command_state_updates(None, command, {}) == {}
+
+
+def test_stop_when_the_car_is_not_charging_counts_as_done():
+    switch, coordinator = _switch("Stopped")
+    coordinator.fail = "not_charging"
+    asyncio.run(switch.async_turn_off())
+    assert coordinator.refreshed == 1
+
+
+def test_start_when_already_charging_or_full_counts_as_done():
+    for reason in ("is_charging", "complete"):
+        switch, coordinator = _switch("Charging")
+        coordinator.fail = reason
+        asyncio.run(switch.async_turn_on())
+        assert coordinator.refreshed == 1
+
+
+def test_other_failures_are_home_assistant_errors():
+    """Automations use continue_on_error, which only covers HomeAssistantError."""
+    import pytest
+    from homeassistant.exceptions import HomeAssistantError
+
+    switch, coordinator = _switch("Disconnected")
+    coordinator.fail = "disconnected"
+    with pytest.raises(HomeAssistantError, match="disconnected"):
+        asyncio.run(switch.async_turn_on())
+    assert coordinator.refreshed == 0

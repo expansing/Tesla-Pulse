@@ -672,6 +672,10 @@ without touching the wall charger. It is on while the car reports `Charging` or
 the Wake Up button first. Its state is never set ahead of telemetry, so an
 automation can wait for `Charging State` to confirm that the car really stopped.
 
+Stopping a car that is not charging, or starting one that is already charging or
+full, counts as done. Other failures are raised as Home Assistant errors, so an
+automation step with `continue_on_error: true` carries on.
+
 ## Metric Units
 
 The integration reports values in metric units:

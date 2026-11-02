@@ -15,7 +15,7 @@ from homeassistant.helpers.event import async_track_time_interval
 import voluptuous as vol
 
 from .const import CONF_WAKE_ON_STARTUP, DOMAIN
-from .coordinator import TeslaVehicleCommandCoordinator
+from .coordinator import TeslaVehicleCommandCoordinator, options_changed
 from .proxy_manager import ProxyManager
 from .telemetry_consumer import TelemetryConsumer, async_setup_telemetry_consumer
 
@@ -116,6 +116,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "coordinator": coordinator,
         "proxy_manager": proxy_manager,
         "telemetry_consumer": telemetry_consumer,
+        # Options this setup was built with; a save that leaves them unchanged
+        # (such as a refreshed token in entry.data) must not reload the entry.
+        "options": dict(entry.options),
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -263,7 +266,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Update options."""
+    """Reload when the options change.
+
+    Home Assistant calls this listener for every config entry update, including
+    the token refresh that the coordinator stores in entry.data before a command.
+    Reloading then would replace the coordinator in the middle of that command,
+    so a wake-up would wait for telemetry that only the new coordinator receives.
+    """
+    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if entry_data is not None and not options_changed(
+        entry_data.get("options"), entry.options
+    ):
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 
