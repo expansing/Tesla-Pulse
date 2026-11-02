@@ -348,6 +348,21 @@ _OPTIONAL_CAPABILITY_ABSENCE_SESSIONS = 2
 _OPTIONAL_CAPABILITY_MINIMUM_FRAMES = 3
 
 
+def options_changed(previous: Any, current: Any) -> bool:
+    """Return whether config entry options differ from the ones in use."""
+    if previous is None:
+        return True
+    return dict(previous) != dict(current or {})
+
+
+def _stored_token_expiry(tokens: dict[str, Any]) -> float:
+    """Return the stored access token expiry as a Unix time, or 0 if unknown."""
+    try:
+        return float(tokens.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Class to manage fetching Tesla vehicle data."""
 
@@ -361,8 +376,13 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.entry = entry
         self.proxy_manager = proxy_manager
         self._vehicles = entry.data.get("vehicles", [])
-        self._access_token: str | None = None
-        self._token_expires_at: float = 0
+        # Reuse the stored access token while it is valid, so a reload does not
+        # force a token refresh (and another entry update) on the next command.
+        tokens = entry.data.get("tokens") or {}
+        self._access_token: str | None = tokens.get("access_token") or None
+        self._token_expires_at: float = (
+            _stored_token_expiry(tokens) if self._access_token else 0
+        )
         self._telemetry_store = Store[dict[str, Any]](
             hass,
             _TELEMETRY_STORE_VERSION,
@@ -2901,7 +2921,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     await self._async_wait_for_telemetry_after(
                         vin, telemetry_generation, telemetry_event
                     )
-                except TimeoutError as err:
+                except (TimeoutError, asyncio.TimeoutError) as err:
+                    # asyncio.TimeoutError is its own class before Python 3.11
                     raise HomeAssistantError(
                         f"Vehicle {vin} did not become ready within "
                         f"{WAKE_TELEMETRY_TIMEOUT_SECONDS} seconds after wake-up"

@@ -5,6 +5,7 @@ from __future__ import annotations
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
@@ -137,6 +138,11 @@ CHARGING_ON_STATES = ("Charging", "Starting")
 CHARGING_STATES = ("Charging", "Complete", "Disconnected", "Stopped", "NoPower", "Starting")
 
 
+# Tesla's answers when the car is already where the command wants it.
+CHARGE_START_ALREADY_DONE = {"is_charging", "complete"}
+CHARGE_STOP_ALREADY_DONE = {"not_charging"}
+
+
 class TeslaChargingSwitch(TeslaVehicleControlEntity, SwitchEntity):
     """Switch to start or stop charging (charge_start / charge_stop).
 
@@ -164,9 +170,20 @@ class TeslaChargingSwitch(TeslaVehicleControlEntity, SwitchEntity):
         return state in CHARGING_ON_STATES
 
     async def async_turn_on(self, **kwargs) -> None:
-        await self.coordinator.async_send_command(self.vin, "charge_start")
-        await self.coordinator.async_request_refresh()
+        await self._async_charge_command("charge_start", CHARGE_START_ALREADY_DONE)
 
     async def async_turn_off(self, **kwargs) -> None:
-        await self.coordinator.async_send_command(self.vin, "charge_stop")
+        await self._async_charge_command("charge_stop", CHARGE_STOP_ALREADY_DONE)
+
+    async def _async_charge_command(self, command: str, already_done: set[str]) -> None:
+        """Send the command; a car that is already in the wanted state counts as done.
+
+        Other failures are raised as HomeAssistantError, so automations can carry
+        on with continue_on_error (a plain RuntimeError would stop them).
+        """
+        try:
+            await self.coordinator.async_send_command(self.vin, command)
+        except RuntimeError as err:
+            if not any(reason in str(err) for reason in already_done):
+                raise HomeAssistantError(f"{self._attr_name}: {err}") from err
         await self.coordinator.async_request_refresh()
