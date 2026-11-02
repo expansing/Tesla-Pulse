@@ -2921,7 +2921,8 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     await self._async_wait_for_telemetry_after(
                         vin, telemetry_generation, telemetry_event
                     )
-                except TimeoutError as err:
+                except (TimeoutError, asyncio.TimeoutError) as err:
+                    # asyncio.TimeoutError is its own class before Python 3.11
                     raise HomeAssistantError(
                         f"Vehicle {vin} did not become ready within "
                         f"{WAKE_TELEMETRY_TIMEOUT_SECONDS} seconds after wake-up"
