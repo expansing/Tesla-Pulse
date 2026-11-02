@@ -19,5 +19,5 @@
   "requirements": [
     "pyzmq>=25.0.0"
   ],
-  "version": "0.7.16"
+  "version": "0.7.17"
 }
