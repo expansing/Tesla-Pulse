@@ -664,6 +664,14 @@ tesla_post "/api/1/vehicles/$VIN/command/actuate_trunk" '{"which_trunk":"front"}
 
 An HTTP `408` means the vehicle is asleep or offline. An error saying that the public key is not paired means the matching public key has not yet been enrolled with the vehicle.
 
+## Charging switch
+
+`switch.<vehicle>_charging` starts and stops charging (`charge_start` / `charge_stop`)
+without touching the wall charger. It is on while the car reports `Charging` or
+`Starting`. Like the other controls it is unavailable while the car sleeps: press
+the Wake Up button first. Its state is never set ahead of telemetry, so an
+automation can wait for `Charging State` to confirm that the car really stopped.
+
 ## Metric Units
 
 The integration reports values in metric units:

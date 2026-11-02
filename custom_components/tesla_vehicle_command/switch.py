@@ -27,6 +27,7 @@ async def async_setup_entry(
             TeslaSentryModeSwitch(coordinator, vin, vehicle["name"]),
             TeslaChargePortSwitch(coordinator, vin, vehicle["name"]),
             TeslaDefrostSwitch(coordinator, vin, vehicle["name"]),
+            TeslaChargingSwitch(coordinator, vin, vehicle["name"]),
         ])
 
     async_add_entities(entities)
@@ -128,4 +129,44 @@ class TeslaDefrostSwitch(TeslaVehicleControlEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs) -> None:
         await self.coordinator.async_send_command(self.vin, "preconditioning_max_off")
+        await self.coordinator.async_request_refresh()
+
+
+# charging states in which the car is taking (or about to take) energy
+CHARGING_ON_STATES = ("Charging", "Starting")
+CHARGING_STATES = ("Charging", "Complete", "Disconnected", "Stopped", "NoPower", "Starting")
+
+
+class TeslaChargingSwitch(TeslaVehicleControlEntity, SwitchEntity):
+    """Switch to start or stop charging (charge_start / charge_stop).
+
+    Lets automations pause the car without cutting power to the wall charger.
+    """
+
+    def __init__(
+        self,
+        coordinator: TeslaVehicleCommandCoordinator,
+        vin: str,
+        vehicle_name: str,
+    ) -> None:
+        super().__init__(coordinator, vin, vehicle_name)
+        self._attr_unique_id = f"{vin}_charging"
+        self._attr_name = "Charging"
+        self._attr_icon = "mdi:ev-station"
+
+    @property
+    def is_on(self) -> bool | None:
+        vehicle_data = self.coordinator.data.get(self.vin, {})
+        response = vehicle_data.get("response", {})
+        state = response.get("charge_state", {}).get("charging_state")
+        if state not in CHARGING_STATES:
+            return None
+        return state in CHARGING_ON_STATES
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self.coordinator.async_send_command(self.vin, "charge_start")
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self.coordinator.async_send_command(self.vin, "charge_stop")
         await self.coordinator.async_request_refresh()
