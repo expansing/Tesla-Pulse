@@ -14,13 +14,12 @@ import zmq.asyncio
 
 from homeassistant.core import HomeAssistant
 
+from .addon_hosts import telemetry_host
 from .const import DOMAIN, TELEMETRY_ZMQ_PORT
 from .coordinator import TeslaVehicleCommandCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-# Hardcoded addon hostname for the telemetry receiver
-TELEMETRY_ADDON_HOSTNAME = "local-tesla-vehicle-command-telemetry"
 _BRICK_VOLTAGE_MAX_SIGNAL = "BrickVoltageMax"
 _BRICK_VOLTAGE_MIN_SIGNAL = "BrickVoltageMin"
 _BRICK_VOLTAGE_MAX_INDEX_SIGNAL = "NumBrickVoltageMax"
@@ -38,7 +37,7 @@ class TelemetryConsumer:
         """Initialize the telemetry consumer."""
         self.hass = hass
         self.coordinator = coordinator
-        self._zmq_endpoint = f"tcp://{TELEMETRY_ADDON_HOSTNAME}:{TELEMETRY_ZMQ_PORT}"
+        self._zmq_endpoint = f"tcp://{telemetry_host()}:{TELEMETRY_ZMQ_PORT}"
         self._context: zmq.asyncio.Context | None = None
         self._socket: zmq.asyncio.Socket | None = None
         self._task: asyncio.Task | None = None
