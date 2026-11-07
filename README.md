@@ -358,7 +358,7 @@ The integration creates the following private internal proxy files automatically
 /config/tesla_vehicle_command/proxy-command-key.pem
 ```
 
-Do not edit these generated files. The integration and local proxy use the Supervisor DNS hostname `local-tesla-vehicle-command-proxy` internally.
+Do not edit these generated files. The integration reaches the add-ons through their Supervisor DNS hostnames, which depend on where each add-on was installed from: `local-tesla-vehicle-command-proxy` for a local add-on, or `<repository hash>-tesla-vehicle-command-proxy` when it was installed from the Add-on Store (`174da054-…` for this repository). The integration looks the installed add-ons up through the Supervisor API at startup and logs the hostname it uses; without Supervisor it keeps the `local-…` names.
 
 ### Startup State Restoration
 
@@ -610,7 +610,7 @@ tesla_post() {
 }
 ```
 
-If the terminal does not resolve `local-tesla-vehicle-command-proxy`, run the commands from a terminal add-on on the Home Assistant host or use the proxy add-on container's Supervisor-network address. Do not expose port `4443` to make terminal access easier.
+If the proxy was installed from the Add-on Store, replace the hostname with the one shown by `ha apps info <slug>` (for this repository, `174da054-tesla-vehicle-command-proxy`). If the terminal does not resolve it, run the commands from a terminal add-on on the Home Assistant host or use the proxy add-on container's Supervisor-network address. Do not expose port `4443` to make terminal access easier.
 
 Wake an asleep vehicle. It may take up to a minute before the vehicle accepts another command:
 

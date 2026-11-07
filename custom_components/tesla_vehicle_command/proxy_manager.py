@@ -18,12 +18,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .addon_hosts import async_resolve_addon_hosts, proxy_host
 from .const import (
     CONF_PRIVATE_KEY_PATH,
     CONF_TELEMETRY_HOSTNAME,
     CONF_VEHICLES,
     DOMAIN,
-    PROXY_HOST,
     PROXY_PORT,
 )
 
@@ -79,6 +79,7 @@ class ProxyManager:
         if not private_key_path or not Path(private_key_path).is_file():
             raise RuntimeError(f"Private key not found at {private_key_path}")
 
+        await async_resolve_addon_hosts(self.hass)
         config_dir = Path(self.hass.config.path(DOMAIN))
         self._cert_path, self._key_path, self._ca_path = (
             await self.hass.async_add_executor_job(
@@ -115,14 +116,14 @@ class ProxyManager:
         while asyncio.get_running_loop().time() < deadline:
             try:
                 async with session.get(
-                    f"https://{PROXY_HOST}:{PROXY_PORT}/health",
+                    f"https://{proxy_host()}:{PROXY_PORT}/health",
                     ssl=ssl_context,
                     timeout=aiohttp.ClientTimeout(total=2),
                 ) as response:
                     self._running = True
                     _LOGGER.info(
                         "Tesla Vehicle Command proxy is ready at %s:%s (%s)",
-                        PROXY_HOST,
+                        proxy_host(),
                         PROXY_PORT,
                         response.status,
                     )
@@ -256,7 +257,7 @@ class ProxyManager:
                 x509.SubjectAlternativeName(
                     [
                         x509.DNSName("localhost"),
-                        x509.DNSName(PROXY_HOST),
+                        x509.DNSName(proxy_host()),
                         x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
                     ]
                 ),
@@ -321,7 +322,7 @@ class ProxyManager:
             return False
 
         return (
-            PROXY_HOST in subject_alt_name.get_values_for_type(x509.DNSName)
+            proxy_host() in subject_alt_name.get_values_for_type(x509.DNSName)
             and authority_key_identifier.key_identifier is not None
         )
 
