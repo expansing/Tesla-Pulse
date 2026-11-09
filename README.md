@@ -652,6 +652,7 @@ Start or stop charging, or set the charge limit:
 tesla_post "/api/1/vehicles/$VIN/command/charge_start" '{}'
 tesla_post "/api/1/vehicles/$VIN/command/charge_stop" '{}'
 tesla_post "/api/1/vehicles/$VIN/command/set_charge_limit" '{"percent":80}'
+tesla_post "/api/1/vehicles/$VIN/command/set_charging_amps" '{"charging_amps":12}'
 ```
 
 Open the charge port, rear trunk, or front trunk:
@@ -663,6 +664,18 @@ tesla_post "/api/1/vehicles/$VIN/command/actuate_trunk" '{"which_trunk":"front"}
 ```
 
 An HTTP `408` means the vehicle is asleep or offline. An error saying that the public key is not paired means the matching public key has not yet been enrolled with the vehicle.
+
+## Charging current
+
+`number.<vehicle>_charging_current` sets how many amps the car takes
+(`set_charging_amps`), so an automation can slow charging down while the house
+needs the power instead of stopping it. It shows the amps the car is set to
+(`ChargeCurrentRequest`); the slider runs from 5 A to what the connected charger
+allows (`ChargeCurrentRequestMax`, 32 A if the car has not reported it). Values
+are whole amps and are clamped to that range. Tesla may ignore the first value
+below 5 A, so stop the car with the Charging switch instead of setting 0. Like
+the other controls it is unavailable while the car sleeps. The shown value is
+updated as soon as the car accepts the command and then follows telemetry.
 
 ## Charging switch
 

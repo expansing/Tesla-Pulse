@@ -2566,6 +2566,10 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             percent := body.get("percent"), (int, float)
         ) and not isinstance(percent, bool):
             return {"charge_state": {"charge_limit_soc": int(percent)}}
+        if command == "set_charge_current" and isinstance(
+            amps := body.get("charging_amps"), (int, float)
+        ) and not isinstance(amps, bool):
+            return {"charge_state": {"charge_current_request": int(amps)}}
         if command == "seat_heater":
             seat_keys = (
                 "seat_heater_left",
