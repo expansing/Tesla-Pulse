@@ -19,6 +19,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .addon_hosts import proxy_host
 from .const import (
     API_COMMAND,
     API_FLEET_TELEMETRY_CONFIG,
@@ -34,7 +35,6 @@ from .const import (
     CONF_TELEMETRY_REGISTRATION_REQUIRED_VINS,
     DEFAULT_TELEMETRY_INACTIVITY_MINUTES,
     DOMAIN,
-    PROXY_HOST,
     PROXY_PORT,
     WAKE_TELEMETRY_TIMEOUT_SECONDS,
 )
@@ -2863,7 +2863,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ssl_context = await self._get_ssl_context()
 
         cmd = COMMANDS.get(command, command)
-        url = f"https://{PROXY_HOST}:{PROXY_PORT}{API_COMMAND.format(vin=vin, command=cmd)}"
+        url = f"https://{proxy_host()}:{PROXY_PORT}{API_COMMAND.format(vin=vin, command=cmd)}"
         headers = {"Authorization": f"Bearer {self._access_token}", "Content-Type": "application/json"}
 
         # Use predefined body or provided body
@@ -2947,7 +2947,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         session = async_get_clientsession(self.hass)
         ssl_context = await self._get_ssl_context()
 
-        url = f"https://{PROXY_HOST}:{PROXY_PORT}{API_WAKE_UP.format(vin=vin)}"
+        url = f"https://{proxy_host()}:{PROXY_PORT}{API_WAKE_UP.format(vin=vin)}"
         headers = {
             "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
@@ -3003,7 +3003,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "fields": _FLEET_TELEMETRY_FIELDS,
             },
         }
-        url = f"https://{PROXY_HOST}:{PROXY_PORT}{API_FLEET_TELEMETRY_CONFIG}"
+        url = f"https://{proxy_host()}:{PROXY_PORT}{API_FLEET_TELEMETRY_CONFIG}"
         try:
             async with session.post(
                 url,
@@ -3065,7 +3065,7 @@ class TeslaVehicleCommandCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         session = async_get_clientsession(self.hass)
         ssl_context = await self._get_ssl_context()
 
-        url = f"https://{PROXY_HOST}:{PROXY_PORT}/api/1/vehicles/{vin}/vehicle_data"
+        url = f"https://{proxy_host()}:{PROXY_PORT}/api/1/vehicles/{vin}/vehicle_data"
         headers = {"Authorization": f"Bearer {self._access_token}", "Content-Type": "application/json"}
 
         try:

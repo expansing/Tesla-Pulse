@@ -10,13 +10,13 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .addon_hosts import proxy_host
 from .const import (
     API_COMMAND,
     API_VEHICLES,
     API_WAKE_UP,
     COMMAND_BODIES,
     COMMANDS,
-    PROXY_HOST,
     PROXY_PORT,
 )
 from .proxy_manager import ProxyManager
@@ -42,7 +42,7 @@ class TeslaVehicleCommandAPI:
     @property
     def base_url(self) -> str:
         """Return the proxy base URL."""
-        return f"https://{PROXY_HOST}:{PROXY_PORT}"
+        return f"https://{proxy_host()}:{PROXY_PORT}"
 
     @property
     def ssl_context(self):
